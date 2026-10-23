@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeVar, overload
 
 from hartreez import constants
 from hartreez.dimensions import Dimensions
@@ -13,34 +13,51 @@ from hartreez.errors import UnitSystemError
 from hartreez.parser import parse_unit
 from hartreez.units import CHARGE, ENERGY, LENGTH, MASS, TEMPERATURE, TIME, Unit
 
-# Unit factor properties and the external unit each one expresses.
-_UNIT_FACTORS: dict[str, str] = {
-    "EV": "eV",
-    "HARTREE": "Hartree",
-    "HA": "Ha",
-    "RY": "Ry",
-    "ANGSTROM": "angstrom",
-    "ANG": "ang",
-    "BOHR": "bohr",
-    "NM": "nm",
-    "FS": "fs",
-    "PS": "ps",
-    "NS": "ns",
-    "DA": "Da",
-    "AMU": "amu",
-    "KCALPERMOL": "kcal/mol",
-    "KJPERMOL": "kJ/mol",
-    "DEBYE": "D",
-    "THZ": "THz",
-    "CM1": "cm1",
-    "ATM": "atm",
-    "BAR": "bar",
-    "KBAR": "kbar",
-    "GPA": "GPa",
-    "PA": "Pa",
-    "NEWTON": "N",
-    "NN": "nN",
-}
+
+_V = TypeVar("_V", bound="_StoredValue")
+
+
+class _StoredValue:
+    """A float computed once per system and read from its stored values."""
+
+    name: str
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    @overload
+    def __get__(self: _V, system: None, owner: type | None = None) -> _V: ...
+    @overload
+    def __get__(self, system: UnitSystem, owner: type | None = None) -> float: ...
+    def __get__(self, system: UnitSystem | None, owner: type | None = None) -> Any:
+        if system is None:
+            return self
+        return system._values[self.name]  # pyright: ignore[reportPrivateUsage]
+
+    def compute(self, system: UnitSystem) -> float:
+        raise NotImplementedError
+
+
+class _PhysicalConstant(_StoredValue):
+    """The physical constant of the same name, expressed in the system."""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        if name not in constants.CONSTANTS:
+            raise NameError(f"unknown physical constant {name!r}")
+        super().__set_name__(owner, name)
+
+    def compute(self, system: UnitSystem) -> float:
+        return system._physical_constant(self.name)  # pyright: ignore[reportPrivateUsage]
+
+
+class _UnitFactor(_StoredValue):
+    """One external unit expressed in the system."""
+
+    def __init__(self, expression: str) -> None:
+        self.expression = expression
+
+    def compute(self, system: UnitSystem) -> float:
+        return system.factor_from(self.expression)
 
 
 def _resolve_unit(value: str | Unit, name: str, expected: Dimensions) -> Unit:
@@ -133,8 +150,11 @@ class UnitSystem:
         # Physical constants and unit factors are computed once and stored as
         # plain floats, so reading them never re-enters the dimensional
         # machinery. Tracers such as torch.compile rely on this.
-        values = {name: self._physical_constant(name) for name in constants.CONSTANTS}
-        values.update({name: self.factor_from(expression) for name, expression in _UNIT_FACTORS.items()})
+        values = {
+            name: value.compute(self)
+            for name, value in vars(type(self)).items()
+            if isinstance(value, _StoredValue)
+        }
         object.__setattr__(self, "_values", MappingProxyType(values))
 
     @staticmethod
@@ -192,149 +212,43 @@ class UnitSystem:
             raise ValueError(f"unknown physical constant {name!r}")
         return self._values[name]
 
-    @property
-    def K_B(self) -> float:
-        return self._values["K_B"]
+    K_B = _PhysicalConstant()
+    HBAR = _PhysicalConstant()
+    PLANCK = _PhysicalConstant()
+    C_LIGHT = _PhysicalConstant()
+    ALPHA = _PhysicalConstant()
+    M_E = _PhysicalConstant()
+    M_P = _PhysicalConstant()
+    E_CHARGE = _PhysicalConstant()
+    N_A = _PhysicalConstant()
+    EPSILON_0 = _PhysicalConstant()
+    K_E = _PhysicalConstant()
 
-    @property
-    def HBAR(self) -> float:
-        return self._values["HBAR"]
-
-    @property
-    def PLANCK(self) -> float:
-        return self._values["PLANCK"]
-
-    @property
-    def C_LIGHT(self) -> float:
-        return self._values["C_LIGHT"]
-
-    @property
-    def ALPHA(self) -> float:
-        return self._values["ALPHA"]
-
-    @property
-    def M_E(self) -> float:
-        return self._values["M_E"]
-
-    @property
-    def M_P(self) -> float:
-        return self._values["M_P"]
-
-    @property
-    def E_CHARGE(self) -> float:
-        return self._values["E_CHARGE"]
-
-    @property
-    def N_A(self) -> float:
-        return self._values["N_A"]
-
-    @property
-    def EPSILON_0(self) -> float:
-        return self._values["EPSILON_0"]
-
-    @property
-    def K_E(self) -> float:
-        return self._values["K_E"]
-
-    @property
-    def EV(self) -> float:
-        return self._values["EV"]
-
-    @property
-    def HARTREE(self) -> float:
-        return self._values["HARTREE"]
-
-    @property
-    def HA(self) -> float:
-        return self._values["HA"]
-
-    @property
-    def RY(self) -> float:
-        return self._values["RY"]
-
-    @property
-    def ANGSTROM(self) -> float:
-        return self._values["ANGSTROM"]
-
-    @property
-    def ANG(self) -> float:
-        return self._values["ANG"]
-
-    @property
-    def BOHR(self) -> float:
-        return self._values["BOHR"]
-
-    @property
-    def NM(self) -> float:
-        return self._values["NM"]
-
-    @property
-    def FS(self) -> float:
-        return self._values["FS"]
-
-    @property
-    def PS(self) -> float:
-        return self._values["PS"]
-
-    @property
-    def NS(self) -> float:
-        return self._values["NS"]
-
-    @property
-    def DA(self) -> float:
-        return self._values["DA"]
-
-    @property
-    def AMU(self) -> float:
-        return self._values["AMU"]
-
-    @property
-    def KCALPERMOL(self) -> float:
-        return self._values["KCALPERMOL"]
-
-    @property
-    def KJPERMOL(self) -> float:
-        return self._values["KJPERMOL"]
-
-    @property
-    def DEBYE(self) -> float:
-        return self._values["DEBYE"]
-
-    @property
-    def THZ(self) -> float:
-        return self._values["THZ"]
-
-    @property
-    def CM1(self) -> float:
-        return self._values["CM1"]
-
-    @property
-    def ATM(self) -> float:
-        return self._values["ATM"]
-
-    @property
-    def BAR(self) -> float:
-        return self._values["BAR"]
-
-    @property
-    def KBAR(self) -> float:
-        return self._values["KBAR"]
-
-    @property
-    def GPA(self) -> float:
-        return self._values["GPA"]
-
-    @property
-    def PA(self) -> float:
-        return self._values["PA"]
-
-    @property
-    def NEWTON(self) -> float:
-        return self._values["NEWTON"]
-
-    @property
-    def NN(self) -> float:
-        return self._values["NN"]
+    EV = _UnitFactor("eV")
+    HARTREE = _UnitFactor("Hartree")
+    HA = _UnitFactor("Ha")
+    RY = _UnitFactor("Ry")
+    ANGSTROM = _UnitFactor("angstrom")
+    ANG = _UnitFactor("ang")
+    BOHR = _UnitFactor("bohr")
+    NM = _UnitFactor("nm")
+    FS = _UnitFactor("fs")
+    PS = _UnitFactor("ps")
+    NS = _UnitFactor("ns")
+    DA = _UnitFactor("Da")
+    AMU = _UnitFactor("amu")
+    KCALPERMOL = _UnitFactor("kcal/mol")
+    KJPERMOL = _UnitFactor("kJ/mol")
+    DEBYE = _UnitFactor("D")
+    THZ = _UnitFactor("THz")
+    CM1 = _UnitFactor("cm1")
+    ATM = _UnitFactor("atm")
+    BAR = _UnitFactor("bar")
+    KBAR = _UnitFactor("kbar")
+    GPA = _UnitFactor("GPa")
+    PA = _UnitFactor("Pa")
+    NEWTON = _UnitFactor("N")
+    NN = _UnitFactor("nN")
 
 
 au = UnitSystem(length="bohr", time="atomic_time", energy="Hartree", charge="e", temperature="K")

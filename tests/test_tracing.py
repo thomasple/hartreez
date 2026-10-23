@@ -3,10 +3,11 @@ from typing import Any
 import pytest
 
 from hartreez import UnitSystem, constant_names
+from hartreez.systems import _StoredValue  # pyright: ignore[reportPrivateUsage]
 
 
 def _public_property_names() -> list[str]:
-    return [name for name, value in vars(UnitSystem).items() if isinstance(value, property)]
+    return [name for name, value in vars(UnitSystem).items() if isinstance(value, _StoredValue)]
 
 
 def test_constants_and_unit_factors_are_stored_not_recomputed(monkeypatch: pytest.MonkeyPatch) -> None:
