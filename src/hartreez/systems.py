@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from hartreez import constants
@@ -11,6 +12,35 @@ from hartreez.dimensions import Dimensions
 from hartreez.errors import UnitSystemError
 from hartreez.parser import parse_unit
 from hartreez.units import CHARGE, ENERGY, LENGTH, MASS, TEMPERATURE, TIME, Unit
+
+# Unit factor properties and the external unit each one expresses.
+_UNIT_FACTORS: dict[str, str] = {
+    "EV": "eV",
+    "HARTREE": "Hartree",
+    "HA": "Ha",
+    "RY": "Ry",
+    "ANGSTROM": "angstrom",
+    "ANG": "ang",
+    "BOHR": "bohr",
+    "NM": "nm",
+    "FS": "fs",
+    "PS": "ps",
+    "NS": "ns",
+    "DA": "Da",
+    "AMU": "amu",
+    "KCALPERMOL": "kcal/mol",
+    "KJPERMOL": "kJ/mol",
+    "DEBYE": "D",
+    "THZ": "THz",
+    "CM1": "cm1",
+    "ATM": "atm",
+    "BAR": "bar",
+    "KBAR": "kbar",
+    "GPA": "GPa",
+    "PA": "Pa",
+    "NEWTON": "N",
+    "NN": "nN",
+}
 
 
 def _resolve_unit(value: str | Unit, name: str, expected: Dimensions) -> Unit:
@@ -43,6 +73,7 @@ class UnitSystem:
     charge: Unit
     temperature: Unit
     _scales: tuple[float, float, float, float, float] = field(repr=False)
+    _values: MappingProxyType[str, float] = field(repr=False, compare=False)
 
     def __init__(
         self,
@@ -99,10 +130,22 @@ class UnitSystem:
             (scales["mass"], scales["length"], scales["time"], scales["charge"], scales["temperature"]),
         )
 
+        # Physical constants and unit factors are computed once and stored as
+        # plain floats, so reading them never re-enters the dimensional
+        # machinery. Tracers such as torch.compile rely on this.
+        values = {name: self._physical_constant(name) for name in constants.CONSTANTS}
+        values.update({name: self.factor_from(expression) for name, expression in _UNIT_FACTORS.items()})
+        object.__setattr__(self, "_values", MappingProxyType(values))
+
     @staticmethod
     def _dims_scale(dimensions: Dimensions, scales: tuple[float, float, float, float, float]) -> float:
         exponents = (dimensions.mass, dimensions.length, dimensions.time, dimensions.charge, dimensions.temperature)
-        return math.prod(scale ** float(exponent) for scale, exponent in zip(scales, exponents))
+        # A plain loop rather than math.prod over a generator, which
+        # torch.compile cannot trace.
+        result = 1.0
+        for scale, exponent in zip(scales, exponents):
+            result *= scale ** float(exponent)
+        return result
 
     def factor_from(self, unit: str | Unit) -> float:
         """Return one external unit expressed in this system as a float."""
@@ -130,9 +173,6 @@ class UnitSystem:
 
         return value * self.factor_to(unit)
 
-    def _convenience(self, expression: str) -> float:
-        return self.factor_from(expression)
-
     def _physical_constant(self, name: str) -> float:
         """Express an SI constant in this system, preserving dimensionless values."""
 
@@ -148,154 +188,153 @@ class UnitSystem:
 
         if type(name) is not str:
             raise TypeError("constant name must be a string")
-        try:
-            return self._physical_constant(name)
-        except KeyError as error:
-            raise ValueError(f"unknown physical constant {name!r}") from error
+        if name not in constants.CONSTANTS:
+            raise ValueError(f"unknown physical constant {name!r}")
+        return self._values[name]
 
     @property
     def K_B(self) -> float:
-        return self._physical_constant("K_B")
+        return self._values["K_B"]
 
     @property
     def HBAR(self) -> float:
-        return self._physical_constant("HBAR")
+        return self._values["HBAR"]
 
     @property
     def PLANCK(self) -> float:
-        return self._physical_constant("PLANCK")
+        return self._values["PLANCK"]
 
     @property
     def C_LIGHT(self) -> float:
-        return self._physical_constant("C_LIGHT")
+        return self._values["C_LIGHT"]
 
     @property
     def ALPHA(self) -> float:
-        return self._physical_constant("ALPHA")
+        return self._values["ALPHA"]
 
     @property
     def M_E(self) -> float:
-        return self._physical_constant("M_E")
+        return self._values["M_E"]
 
     @property
     def M_P(self) -> float:
-        return self._physical_constant("M_P")
+        return self._values["M_P"]
 
     @property
     def E_CHARGE(self) -> float:
-        return self._physical_constant("E_CHARGE")
+        return self._values["E_CHARGE"]
 
     @property
     def N_A(self) -> float:
-        return self._physical_constant("N_A")
+        return self._values["N_A"]
 
     @property
     def EPSILON_0(self) -> float:
-        return self._physical_constant("EPSILON_0")
+        return self._values["EPSILON_0"]
 
     @property
     def K_E(self) -> float:
-        return self._physical_constant("K_E")
+        return self._values["K_E"]
 
     @property
     def EV(self) -> float:
-        return self._convenience("eV")
+        return self._values["EV"]
 
     @property
     def HARTREE(self) -> float:
-        return self._convenience("Hartree")
+        return self._values["HARTREE"]
 
     @property
     def HA(self) -> float:
-        return self._convenience("Ha")
+        return self._values["HA"]
 
     @property
     def RY(self) -> float:
-        return self._convenience("Ry")
+        return self._values["RY"]
 
     @property
     def ANGSTROM(self) -> float:
-        return self._convenience("angstrom")
+        return self._values["ANGSTROM"]
 
     @property
     def ANG(self) -> float:
-        return self._convenience("ang")
+        return self._values["ANG"]
 
     @property
     def BOHR(self) -> float:
-        return self._convenience("bohr")
+        return self._values["BOHR"]
 
     @property
     def NM(self) -> float:
-        return self._convenience("nm")
+        return self._values["NM"]
 
     @property
     def FS(self) -> float:
-        return self._convenience("fs")
+        return self._values["FS"]
 
     @property
     def PS(self) -> float:
-        return self._convenience("ps")
+        return self._values["PS"]
 
     @property
     def NS(self) -> float:
-        return self._convenience("ns")
+        return self._values["NS"]
 
     @property
     def DA(self) -> float:
-        return self._convenience("Da")
+        return self._values["DA"]
 
     @property
     def AMU(self) -> float:
-        return self._convenience("amu")
+        return self._values["AMU"]
 
     @property
     def KCALPERMOL(self) -> float:
-        return self._convenience("kcal/mol")
+        return self._values["KCALPERMOL"]
 
     @property
     def KJPERMOL(self) -> float:
-        return self._convenience("kJ/mol")
+        return self._values["KJPERMOL"]
 
     @property
     def DEBYE(self) -> float:
-        return self._convenience("D")
+        return self._values["DEBYE"]
 
     @property
     def THZ(self) -> float:
-        return self._convenience("THz")
+        return self._values["THZ"]
 
     @property
     def CM1(self) -> float:
-        return self._convenience("cm1")
+        return self._values["CM1"]
 
     @property
     def ATM(self) -> float:
-        return self._convenience("atm")
+        return self._values["ATM"]
 
     @property
     def BAR(self) -> float:
-        return self._convenience("bar")
+        return self._values["BAR"]
 
     @property
     def KBAR(self) -> float:
-        return self._convenience("kbar")
+        return self._values["KBAR"]
 
     @property
     def GPA(self) -> float:
-        return self._convenience("GPa")
+        return self._values["GPA"]
 
     @property
     def PA(self) -> float:
-        return self._convenience("Pa")
+        return self._values["PA"]
 
     @property
     def NEWTON(self) -> float:
-        return self._convenience("N")
+        return self._values["NEWTON"]
 
     @property
     def NN(self) -> float:
-        return self._convenience("nN")
+        return self._values["NN"]
 
 
 au = UnitSystem(length="bohr", time="atomic_time", energy="Hartree", charge="e", temperature="K")

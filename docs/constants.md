@@ -51,3 +51,25 @@ approximately one. The electrostatic constants satisfy `au.K_E ≈ 1` and
 For an MD system using `kcal/mol` and kelvin, `K_B` is about
 `0.00198720425864083 kcal mol^-1 K^-1`; for example, multiplying by a
 temperature in kelvin gives thermal energy in the selected energy unit.
+
+## Tracing and compilation
+
+Physical constants and unit factors (the uppercase properties and
+`constant(name)`) are computed once when a `UnitSystem` is created and stored
+as plain floats. Reading them never re-enters the dimensional machinery, so
+they are safe inside `torch.compile(..., fullgraph=True)` and other tracers:
+
+```python
+md = UnitSystem(length="angstrom", time="ps", energy="kcal/mol")
+
+
+@torch.compile(fullgraph=True)
+def thermal_energy(temperature):
+    return temperature * md.K_B
+```
+
+The expression-based methods `factor_from`, `factor_to`, `to_internal`, and
+`from_internal` are also known to trace under `torch.compile`, but they parse
+the unit expression during tracing, which relies on the tracer supporting
+that Python code. For robustness inside compiled regions, prefer the
+properties, or compute expression factors before entering the compiled region.

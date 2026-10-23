@@ -112,6 +112,9 @@ property return Python floats. The convenience properties are `EV`,
 `BAR`, `KBAR`, `GPA`, `PA`, `NEWTON`, and `NN`. Every property equals
 `factor_from` for the corresponding registered unit expression.
 
+Unit factor properties are computed once when the system is created and
+stored as plain floats; see [tracing and compilation](constants.md#tracing-and-compilation).
+
 The predefined `au` uses bohr, atomic time, Hartree, elementary charge, and
 kelvin; electron mass is derived as the coherent mass scale. Thus
 `au.EV` converts eV values to Hartree by multiplication, and `au.ANGSTROM`
