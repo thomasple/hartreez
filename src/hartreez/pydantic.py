@@ -87,7 +87,14 @@ class UnitAwareModel(BaseModel):
 
     @classmethod
     def _unit_reference_units(cls) -> dict[str, str]:
-        reference_units: dict[str, str] = {}
+        # Register only the input keys Pydantic accepts, so a suffixed key it
+        # would ignore is rejected instead of converted and then dropped.
+        config = cls.model_config
+        by_alias = config.get("validate_by_alias", True)
+        by_name = config.get("validate_by_name", False) or config.get(
+            "populate_by_name", False
+        )
+        registered: dict[str, tuple[str, UnitDimension]] = {}
         for name, model_field in cls.model_fields.items():
             dimension = _field_dimension(name, model_field)
             if dimension is None:
@@ -95,12 +102,27 @@ class UnitAwareModel(BaseModel):
             # Input arrives under the validation alias, which Pydantic also
             # fills from ``alias`` and ``alias_generator``. AliasPath and
             # AliasChoices are not supported.
-            keys = [name]
-            if isinstance(model_field.validation_alias, str):
-                keys.append(model_field.validation_alias)
+            alias = model_field.validation_alias
+            keys: list[str] = []
+            if alias is None or by_name:
+                keys.append(name)
+            if isinstance(alias, str) and by_alias:
+                keys.append(alias)
             for key in keys:
-                reference_units.setdefault(f"/{_pointer_token(key)}", dimension.expression)
-        return reference_units
+                pointer = f"/{_pointer_token(key)}"
+                previous = registered.setdefault(pointer, (name, dimension))
+                # Pydantic fills every field that shares an input key, so one
+                # conversion factor must suit all of them.
+                if previous[1].dimensions != dimension.dimensions:
+                    raise TypeError(
+                        f"input key {key!r} is shared by fields {previous[0]!r} and "
+                        f"{name!r} with conflicting UnitDimension metadata: "
+                        f"{previous[1].expression!r} and {dimension.expression!r}"
+                    )
+        return {
+            pointer: dimension.expression
+            for pointer, (_, dimension) in registered.items()
+        }
 
     @model_validator(mode="before")
     @classmethod

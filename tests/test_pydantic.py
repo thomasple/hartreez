@@ -69,6 +69,17 @@ class AliasedInput(UnitAwareModel):
     buffer: Length = Field(default=1.0, validation_alias="rb")
 
 
+class StrictAliasInput(UnitAwareModel):
+    skin: Length = Field(default=1.0, alias="rs")
+
+
+class SharedAliasInput(UnitAwareModel):
+    skin: Length = Field(default=1.0, validation_alias="r")
+    cutoff: Annotated[float, UnitDimension("nm")] = Field(
+        default=1.0, validation_alias="r"
+    )
+
+
 class ChoiceAliasInput(UnitAwareModel):
     cutoff: Length = Field(default=1.0, validation_alias=AliasChoices("rc", "cut"))
 
@@ -269,6 +280,47 @@ def test_suffixed_keys_without_a_declared_dimension_are_rejected(
         model.model_validate(
             {"timestep": 1.0, key: 1.0}, context={"unit_system": au}
         )
+
+
+def test_field_names_follow_pydantic_alias_configuration() -> None:
+    # Without populate_by_name, Pydantic ignores the field name of an aliased
+    # field, so its suffixed key must not be converted and then dropped.
+    with pytest.raises(ValidationError, match="no reference unit declared"):
+        StrictAliasInput.model_validate(
+            {"skin[angstrom]": 1.0}, context={"unit_system": au}
+        )
+
+
+def test_input_keys_shared_with_one_dimension_are_accepted() -> None:
+    nm = UnitSystem(length="nm", time="ps", energy="kJ/mol")
+
+    model = SharedAliasInput.model_validate(
+        {"r[angstrom]": 10.0}, context={"unit_system": nm}
+    )
+
+    assert model.skin == pytest.approx(1.0)
+    assert model.cutoff == pytest.approx(1.0)
+
+
+def test_input_keys_shared_with_conflicting_dimensions_are_rejected() -> None:
+    # The models are defined inside the test because defining them must fail.
+    with pytest.raises(TypeError, match="conflicting UnitDimension"):
+
+        class SharedAlias(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            length: Length = Field(default=1.0, validation_alias="v")
+            time: Annotated[float, UnitDimension("fs")] = Field(
+                default=1.0, validation_alias="v"
+            )
+
+    with pytest.raises(TypeError, match="conflicting UnitDimension"):
+
+        class AliasOntoName(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            model_config = ConfigDict(populate_by_name=True)
+
+            length: Length = 1.0
+            time: Annotated[float, UnitDimension("fs")] = Field(
+                default=1.0, validation_alias="length"
+            )
 
 
 def test_dimensions_resolved_by_model_rebuild_are_checked() -> None:
