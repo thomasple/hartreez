@@ -4,13 +4,59 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar, overload
 
 from hartreez import constants
 from hartreez.dimensions import Dimensions
 from hartreez.errors import UnitSystemError
 from hartreez.parser import parse_unit
 from hartreez.units import CHARGE, ENERGY, LENGTH, MASS, TEMPERATURE, TIME, Unit
+
+
+_V = TypeVar("_V", bound="_StoredValue")
+
+
+class _StoredValue:
+    """A float computed once per system and read from its stored values."""
+
+    name: str
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    @overload
+    def __get__(self: _V, system: None, owner: type | None = None) -> _V: ...
+    @overload
+    def __get__(self, system: UnitSystem, owner: type | None = None) -> float: ...
+    def __get__(self, system: UnitSystem | None, owner: type | None = None) -> Any:
+        if system is None:
+            return self
+        return system._values[self.name]  # pyright: ignore[reportPrivateUsage]
+
+    def compute(self, system: UnitSystem) -> float:
+        raise NotImplementedError
+
+
+class _PhysicalConstant(_StoredValue):
+    """The physical constant of the same name, expressed in the system."""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        if name not in constants.CONSTANTS:
+            raise NameError(f"unknown physical constant {name!r}")
+        super().__set_name__(owner, name)
+
+    def compute(self, system: UnitSystem) -> float:
+        return system._physical_constant(self.name)  # pyright: ignore[reportPrivateUsage]
+
+
+class _UnitFactor(_StoredValue):
+    """One external unit expressed in the system."""
+
+    def __init__(self, expression: str) -> None:
+        self.expression = expression
+
+    def compute(self, system: UnitSystem) -> float:
+        return system.factor_from(self.expression)
 
 
 def _resolve_unit(value: str | Unit, name: str, expected: Dimensions) -> Unit:
@@ -43,6 +89,9 @@ class UnitSystem:
     charge: Unit
     temperature: Unit
     _scales: tuple[float, float, float, float, float] = field(repr=False)
+    # A plain dict rather than a MappingProxyType, which pickle cannot
+    # serialize. It is private and never mutated after construction.
+    _values: dict[str, float] = field(repr=False, compare=False)
 
     def __init__(
         self,
@@ -99,10 +148,28 @@ class UnitSystem:
             (scales["mass"], scales["length"], scales["time"], scales["charge"], scales["temperature"]),
         )
 
+        # Physical constants and unit factors are computed once and stored as
+        # plain floats, so reading them never re-enters the dimensional
+        # machinery. Tracers such as torch.compile rely on this.
+        # Walk the MRO base-first so subclasses keep the values declared on
+        # their bases, and a redeclared name takes the subclass's value.
+        values = {
+            name: value.compute(self)
+            for klass in reversed(type(self).__mro__)
+            for name, value in vars(klass).items()
+            if isinstance(value, _StoredValue)
+        }
+        object.__setattr__(self, "_values", values)
+
     @staticmethod
     def _dims_scale(dimensions: Dimensions, scales: tuple[float, float, float, float, float]) -> float:
         exponents = (dimensions.mass, dimensions.length, dimensions.time, dimensions.charge, dimensions.temperature)
-        return math.prod(scale ** float(exponent) for scale, exponent in zip(scales, exponents))
+        # A plain loop rather than math.prod over a generator, which
+        # torch.compile cannot trace.
+        result = 1.0
+        for scale, exponent in zip(scales, exponents):
+            result *= scale ** float(exponent)
+        return result
 
     def factor_from(self, unit: str | Unit) -> float:
         """Return one external unit expressed in this system as a float."""
@@ -130,9 +197,6 @@ class UnitSystem:
 
         return value * self.factor_to(unit)
 
-    def _convenience(self, expression: str) -> float:
-        return self.factor_from(expression)
-
     def _physical_constant(self, name: str) -> float:
         """Express an SI constant in this system, preserving dimensionless values."""
 
@@ -148,154 +212,47 @@ class UnitSystem:
 
         if type(name) is not str:
             raise TypeError("constant name must be a string")
-        try:
-            return self._physical_constant(name)
-        except KeyError as error:
-            raise ValueError(f"unknown physical constant {name!r}") from error
+        if name not in constants.CONSTANTS:
+            raise ValueError(f"unknown physical constant {name!r}")
+        return self._values[name]
 
-    @property
-    def K_B(self) -> float:
-        return self._physical_constant("K_B")
+    K_B = _PhysicalConstant()
+    HBAR = _PhysicalConstant()
+    PLANCK = _PhysicalConstant()
+    C_LIGHT = _PhysicalConstant()
+    ALPHA = _PhysicalConstant()
+    M_E = _PhysicalConstant()
+    M_P = _PhysicalConstant()
+    E_CHARGE = _PhysicalConstant()
+    N_A = _PhysicalConstant()
+    EPSILON_0 = _PhysicalConstant()
+    K_E = _PhysicalConstant()
 
-    @property
-    def HBAR(self) -> float:
-        return self._physical_constant("HBAR")
-
-    @property
-    def PLANCK(self) -> float:
-        return self._physical_constant("PLANCK")
-
-    @property
-    def C_LIGHT(self) -> float:
-        return self._physical_constant("C_LIGHT")
-
-    @property
-    def ALPHA(self) -> float:
-        return self._physical_constant("ALPHA")
-
-    @property
-    def M_E(self) -> float:
-        return self._physical_constant("M_E")
-
-    @property
-    def M_P(self) -> float:
-        return self._physical_constant("M_P")
-
-    @property
-    def E_CHARGE(self) -> float:
-        return self._physical_constant("E_CHARGE")
-
-    @property
-    def N_A(self) -> float:
-        return self._physical_constant("N_A")
-
-    @property
-    def EPSILON_0(self) -> float:
-        return self._physical_constant("EPSILON_0")
-
-    @property
-    def K_E(self) -> float:
-        return self._physical_constant("K_E")
-
-    @property
-    def EV(self) -> float:
-        return self._convenience("eV")
-
-    @property
-    def HARTREE(self) -> float:
-        return self._convenience("Hartree")
-
-    @property
-    def HA(self) -> float:
-        return self._convenience("Ha")
-
-    @property
-    def RY(self) -> float:
-        return self._convenience("Ry")
-
-    @property
-    def ANGSTROM(self) -> float:
-        return self._convenience("angstrom")
-
-    @property
-    def ANG(self) -> float:
-        return self._convenience("ang")
-
-    @property
-    def BOHR(self) -> float:
-        return self._convenience("bohr")
-
-    @property
-    def NM(self) -> float:
-        return self._convenience("nm")
-
-    @property
-    def FS(self) -> float:
-        return self._convenience("fs")
-
-    @property
-    def PS(self) -> float:
-        return self._convenience("ps")
-
-    @property
-    def NS(self) -> float:
-        return self._convenience("ns")
-
-    @property
-    def DA(self) -> float:
-        return self._convenience("Da")
-
-    @property
-    def AMU(self) -> float:
-        return self._convenience("amu")
-
-    @property
-    def KCALPERMOL(self) -> float:
-        return self._convenience("kcal/mol")
-
-    @property
-    def KJPERMOL(self) -> float:
-        return self._convenience("kJ/mol")
-
-    @property
-    def DEBYE(self) -> float:
-        return self._convenience("D")
-
-    @property
-    def THZ(self) -> float:
-        return self._convenience("THz")
-
-    @property
-    def CM1(self) -> float:
-        return self._convenience("cm1")
-
-    @property
-    def ATM(self) -> float:
-        return self._convenience("atm")
-
-    @property
-    def BAR(self) -> float:
-        return self._convenience("bar")
-
-    @property
-    def KBAR(self) -> float:
-        return self._convenience("kbar")
-
-    @property
-    def GPA(self) -> float:
-        return self._convenience("GPa")
-
-    @property
-    def PA(self) -> float:
-        return self._convenience("Pa")
-
-    @property
-    def NEWTON(self) -> float:
-        return self._convenience("N")
-
-    @property
-    def NN(self) -> float:
-        return self._convenience("nN")
+    EV = _UnitFactor("eV")
+    HARTREE = _UnitFactor("Hartree")
+    HA = _UnitFactor("Ha")
+    RY = _UnitFactor("Ry")
+    ANGSTROM = _UnitFactor("angstrom")
+    ANG = _UnitFactor("ang")
+    BOHR = _UnitFactor("bohr")
+    NM = _UnitFactor("nm")
+    FS = _UnitFactor("fs")
+    PS = _UnitFactor("ps")
+    NS = _UnitFactor("ns")
+    DA = _UnitFactor("Da")
+    AMU = _UnitFactor("amu")
+    KCALPERMOL = _UnitFactor("kcal/mol")
+    KJPERMOL = _UnitFactor("kJ/mol")
+    DEBYE = _UnitFactor("D")
+    THZ = _UnitFactor("THz")
+    CM1 = _UnitFactor("cm1")
+    ATM = _UnitFactor("atm")
+    BAR = _UnitFactor("bar")
+    KBAR = _UnitFactor("kbar")
+    GPA = _UnitFactor("GPa")
+    PA = _UnitFactor("Pa")
+    NEWTON = _UnitFactor("N")
+    NN = _UnitFactor("nN")
 
 
 au = UnitSystem(length="bohr", time="atomic_time", energy="Hartree", charge="e", temperature="K")

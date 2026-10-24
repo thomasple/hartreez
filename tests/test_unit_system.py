@@ -1,9 +1,11 @@
+import pickle
 import subprocess
 import sys
 
 import pytest
 
 from hartreez import Dimensions, Unit, UnitSystem, UnitSystemError, au
+from hartreez.systems import _UnitFactor  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
@@ -132,3 +134,30 @@ def test_primary_au_import_loads_no_optional_frameworks() -> None:
         ],
         check=True,
     )
+
+
+def test_subclasses_inherit_constants_and_unit_factors() -> None:
+    class MySystem(UnitSystem):
+        pass
+
+    system = MySystem(length="angstrom", time="ps", energy="kcal/mol")
+    base = UnitSystem(length="angstrom", time="ps", energy="kcal/mol")
+    assert system.K_B == base.K_B
+    assert system.EV == base.EV
+    assert system.constant("HBAR") == base.constant("HBAR")
+
+
+def test_subclass_redeclaring_a_unit_factor_overrides_the_base() -> None:
+    class MySystem(UnitSystem):
+        EV = _UnitFactor("kcal/mol")
+
+    system = MySystem(length="angstrom", time="ps", energy="kcal/mol")
+    assert system.EV == 1.0
+
+
+def test_unit_system_survives_a_pickle_round_trip() -> None:
+    system = UnitSystem(length="angstrom", time="ps", energy="kcal/mol")
+    restored = pickle.loads(pickle.dumps(system))
+    assert restored == system
+    assert restored.K_B == system.K_B
+    assert restored.EV == system.EV
