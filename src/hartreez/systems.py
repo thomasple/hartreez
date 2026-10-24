@@ -89,6 +89,8 @@ class UnitSystem:
     charge: Unit
     temperature: Unit
     _scales: tuple[float, float, float, float, float] = field(repr=False)
+    # A plain dict rather than a MappingProxyType, which pickle cannot
+    # serialize. It is private and never mutated after construction.
     _values: dict[str, float] = field(repr=False, compare=False)
 
     def __init__(
