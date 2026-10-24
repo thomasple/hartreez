@@ -144,16 +144,21 @@ def test_optional_annotated_fields_convert_or_stay_none() -> None:
         )
 
 
-def test_union_members_with_conflicting_dimensions_are_rejected() -> None:
-    class ConflictingInput(UnitAwareModel):
-        value: Annotated[float, UnitDimension("fs")] | Annotated[
-            int, UnitDimension("eV")
-        ]
+def test_conflicting_dimensions_are_rejected_when_the_model_is_defined() -> None:
+    # The models are defined inside the test because defining them must fail.
+    with pytest.raises(TypeError, match="conflicting UnitDimension"):
+
+        class ConflictingMembers(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            value: Annotated[float, UnitDimension("fs")] | Annotated[
+                int, UnitDimension("eV")
+            ]
 
     with pytest.raises(TypeError, match="conflicting UnitDimension"):
-        ConflictingInput.model_validate(
-            {"value[fs]": 1.0}, context={"unit_system": au}
-        )
+
+        class ConflictingOuter(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            value: Annotated[
+                Annotated[float, UnitDimension("fs")] | None, UnitDimension("K")
+            ] = None
 
 
 def test_unannotated_fields_keep_normal_pydantic_conversion_semantics() -> None:

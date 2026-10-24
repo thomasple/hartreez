@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import types
 from collections.abc import Mapping
-from typing import Annotated, Any, Union, cast, get_args, get_origin
+from typing import Annotated, Any, ClassVar, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, ValidationInfo, model_validator
 from pydantic.fields import FieldInfo
@@ -24,30 +24,28 @@ def _pointer_token(value: str) -> str:
 
 
 def _field_dimension(name: str, model_field: FieldInfo) -> UnitDimension | None:
-    for metadata in model_field.metadata:
-        if isinstance(metadata, UnitDimension):
-            return metadata
+    candidates = [m for m in model_field.metadata if isinstance(m, UnitDimension)]
 
     # Pydantic only lifts Annotated metadata from the top of an annotation, so
     # an optional field such as ``Annotated[float, UnitDimension("K")] | None``
     # keeps its dimension inside the union members.
-    if get_origin(model_field.annotation) not in (Union, types.UnionType):
+    if get_origin(model_field.annotation) in (Union, types.UnionType):
+        for member in get_args(model_field.annotation):
+            if get_origin(member) is Annotated:
+                candidates.extend(
+                    m for m in get_args(member)[1:] if isinstance(m, UnitDimension)
+                )
+
+    if not candidates:
         return None
-    found: UnitDimension | None = None
-    for member in get_args(model_field.annotation):
-        if get_origin(member) is not Annotated:
-            continue
-        for metadata in get_args(member)[1:]:
-            if isinstance(metadata, UnitDimension):
-                if found is not None and found.dimensions != metadata.dimensions:
-                    raise TypeError(
-                        f"field {name!r} declares conflicting UnitDimension "
-                        f"metadata in its union members: {found.expression!r} "
-                        f"and {metadata.expression!r}"
-                    )
-                found = found or metadata
-                break
-    return found
+    first = candidates[0]
+    for other in candidates[1:]:
+        if other.dimensions != first.dimensions:
+            raise TypeError(
+                f"field {name!r} declares conflicting UnitDimension metadata: "
+                f"{first.expression!r} and {other.expression!r}"
+            )
+    return first
 
 
 class UnitAwareModel(BaseModel):
@@ -65,6 +63,20 @@ class UnitAwareModel(BaseModel):
     scale. Canonical input without unit suffixes can be validated without a
     context.
     """
+
+    # Resolved once per model class, so conflicting declarations fail when the
+    # class is defined rather than on whichever input first carries a suffix.
+    _unit_reference_units: ClassVar[dict[str, str]] = {}
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        reference_units: dict[str, str] = {}
+        for name, model_field in cls.model_fields.items():
+            dimension = _field_dimension(name, model_field)
+            if dimension is not None:
+                reference_units[f"/{_pointer_token(name)}"] = dimension.expression
+        cls._unit_reference_units = reference_units
 
     @model_validator(mode="before")
     @classmethod
@@ -95,14 +107,8 @@ class UnitAwareModel(BaseModel):
                 "(context={'unit_system': system})"
             )
 
-        reference_units: dict[str, str] = {}
-        for name, model_field in cls.model_fields.items():
-            dimension = _field_dimension(name, model_field)
-            if dimension is not None:
-                reference_units[f"/{_pointer_token(name)}"] = dimension.expression
-
         try:
-            references = parse_reference_units(reference_units)
+            references = parse_reference_units(cls._unit_reference_units)
             return normalize_mapping_level(
                 raw_mapping,
                 system,

@@ -119,14 +119,16 @@ When input contains any unit-annotated key, provide a usable `UnitSystem` as
 raises a Pydantic `ValidationError` instead of silently leaving values
 unconverted. The chosen field dimensions are checked when an annotated value
 is supplied. Normalization collisions, such as `timestep` alongside
-`timestep[fs]`, and incompatible annotations also become validation errors.
+`timestep[fs]`, and key suffixes incompatible with a field's dimension also
+become validation errors.
 
 Optional fields can carry the dimension inside the union, as in
 `Annotated[float, UnitDimension("K")] | None` or
 `Optional[Annotated[float, UnitDimension("K")]]`; a suffixed value is then
-checked like a required field's. If several union members declare
-`UnitDimension`, they must agree on the dimensions, otherwise validation of
-annotated input raises `TypeError`.
+checked like a required field's. Every `UnitDimension` declared for a field,
+whether on the annotation itself or on its union members, must agree on the
+dimensions. A conflict is a model definition error: defining the class raises
+`TypeError`, independently of any input.
 
 Fields without `UnitDimension` still follow ordinary mapping conversion when
 their input key is annotated and a system is supplied. Unannotated fields are
