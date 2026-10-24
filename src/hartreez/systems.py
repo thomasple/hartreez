@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any, TypeVar, overload
 
 from hartreez import constants
@@ -90,7 +89,7 @@ class UnitSystem:
     charge: Unit
     temperature: Unit
     _scales: tuple[float, float, float, float, float] = field(repr=False)
-    _values: MappingProxyType[str, float] = field(repr=False, compare=False)
+    _values: dict[str, float] = field(repr=False, compare=False)
 
     def __init__(
         self,
@@ -150,12 +149,15 @@ class UnitSystem:
         # Physical constants and unit factors are computed once and stored as
         # plain floats, so reading them never re-enters the dimensional
         # machinery. Tracers such as torch.compile rely on this.
+        # Walk the MRO base-first so subclasses keep the values declared on
+        # their bases, and a redeclared name takes the subclass's value.
         values = {
             name: value.compute(self)
-            for name, value in vars(type(self)).items()
+            for klass in reversed(type(self).__mro__)
+            for name, value in vars(klass).items()
             if isinstance(value, _StoredValue)
         }
-        object.__setattr__(self, "_values", MappingProxyType(values))
+        object.__setattr__(self, "_values", values)
 
     @staticmethod
     def _dims_scale(dimensions: Dimensions, scales: tuple[float, float, float, float, float]) -> float:
