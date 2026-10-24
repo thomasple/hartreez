@@ -1,6 +1,6 @@
 # Physical constants
 
-`UnitSystem` exposes physical constants as ordinary Python `float` properties.
+`UnitSystem` exposes physical constants as ordinary Python `float` attributes.
 Each dimensional value is expressed in that system's coherent units, so it can
 be used directly in numerical formulas. `ALPHA` and `N_A` are dimensionless and
 retain their stated values in every system; `N_A` is a particle count, matching
@@ -22,7 +22,7 @@ assert math.isclose(au.E_CHARGE, 1.0)
 
 ## Public constants
 
-| Property | Definition and dimensions | Provenance |
+| Attribute | Definition and dimensions | Provenance |
 | --- | --- | --- |
 | `K_B` | Boltzmann constant, energy / temperature | Exact SI defining value, `1.380649e-23 J/K` |
 | `HBAR` | Reduced Planck constant, energy × time | `PLANCK / (2 pi)` |
@@ -54,10 +54,10 @@ temperature in kelvin gives thermal energy in the selected energy unit.
 
 ## Tracing and compilation
 
-Physical constants and unit factors (the uppercase properties and
+Physical constants and unit factors (the uppercase attributes and
 `constant(name)`) are computed once when a `UnitSystem` is created and stored
 as plain floats. Reading them never re-enters the dimensional machinery, so
-they are safe inside `torch.compile(..., fullgraph=True)` and other tracers:
+they are safe inside `torch.compile(..., fullgraph=True)`:
 
 ```python
 md = UnitSystem(length="angstrom", time="ps", energy="kcal/mol")
@@ -72,4 +72,4 @@ The expression-based methods `factor_from`, `factor_to`, `to_internal`, and
 `from_internal` are also known to trace under `torch.compile`, but they parse
 the unit expression during tracing, which relies on the tracer supporting
 that Python code. For robustness inside compiled regions, prefer the
-properties, or compute expression factors before entering the compiled region.
+attributes, or compute expression factors before entering the compiled region.

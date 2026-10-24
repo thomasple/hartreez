@@ -104,15 +104,15 @@ pressure_au = 10.0 * au.KBAR
 force_factor = au.factor_from("eV/ang")
 ```
 
-The convention is consistent for all properties: a named unit factor is one
+The convention is consistent for all attributes: a named unit factor is one
 unit expressed in the active system. `factor_from` and every convenience
-property return Python floats. The convenience properties are `EV`,
+attribute return Python floats. The convenience attributes are `EV`,
 `HARTREE`, `HA`, `RY`, `ANGSTROM`, `ANG`, `BOHR`, `NM`, `FS`, `PS`,
 `NS`, `DA`, `AMU`, `KCALPERMOL`, `KJPERMOL`, `DEBYE`, `THZ`, `CM1`, `ATM`,
-`BAR`, `KBAR`, `GPA`, `PA`, `NEWTON`, and `NN`. Every property equals
+`BAR`, `KBAR`, `GPA`, `PA`, `NEWTON`, and `NN`. Every attribute equals
 `factor_from` for the corresponding registered unit expression.
 
-Unit factor properties are computed once when the system is created and
+Unit factor attributes are computed once when the system is created and
 stored as plain floats; see [tracing and compilation](constants.md#tracing-and-compilation).
 
 The predefined `au` uses bohr, atomic time, Hartree, elementary charge, and

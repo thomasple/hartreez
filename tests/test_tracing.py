@@ -6,13 +6,13 @@ from hartreez import UnitSystem, constant_names
 from hartreez.systems import _StoredValue  # pyright: ignore[reportPrivateUsage]
 
 
-def _public_property_names() -> list[str]:
+def _stored_value_names() -> list[str]:
     return [name for name, value in vars(UnitSystem).items() if isinstance(value, _StoredValue)]
 
 
 def test_constants_and_unit_factors_are_stored_not_recomputed(monkeypatch: pytest.MonkeyPatch) -> None:
     system = UnitSystem(length="angstrom", time="ps", energy="kcal/mol")
-    properties = {name: getattr(system, name) for name in _public_property_names()}
+    attributes = {name: getattr(system, name) for name in _stored_value_names()}
     constants = {name: system.constant(name) for name in constant_names()}
 
     def fail(*args: object, **kwargs: object) -> float:
@@ -22,9 +22,9 @@ def test_constants_and_unit_factors_are_stored_not_recomputed(monkeypatch: pytes
     monkeypatch.setattr(UnitSystem, "_physical_constant", fail)
     monkeypatch.setattr(UnitSystem, "factor_from", fail)
 
-    assert {name: getattr(system, name) for name in properties} == properties
+    assert {name: getattr(system, name) for name in attributes} == attributes
     assert {name: system.constant(name) for name in constants} == constants
-    assert all(type(value) is float for value in properties.values())
+    assert all(type(value) is float for value in attributes.values())
 
 
 def test_stored_values_do_not_affect_equality_or_hashing() -> None:
