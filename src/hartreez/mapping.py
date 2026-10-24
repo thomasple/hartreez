@@ -157,8 +157,13 @@ def normalize_mapping_level(
     recurse: bool,
     references: Mapping[str, _Reference] | None = None,
     pointer: str | None = "",
+    require_references: bool = False,
 ) -> dict[Any, Any]:
-    """Normalize one mapping level; ``recurse`` is a seam for shallow clients."""
+    """Normalize one mapping level; ``recurse`` is a seam for shallow clients.
+
+    With ``require_references``, an annotated key without a reference unit is
+    rejected instead of being converted unchecked.
+    """
 
     entries: list[tuple[Any, Any, str, str | None, str | None]] = []
     seen: dict[Any, Any] = {}
@@ -199,6 +204,11 @@ def normalize_mapping_level(
                 if references is not None and target_pointer is not None
                 else None
             )
+            if reference is None and require_references:
+                raise MappingConversionError(
+                    f"annotated key {original_key!r} at {original_path} has no reference "
+                    f"unit declared for normalized path {target_pointer}"
+                )
             if reference is not None:
                 reference_expression, reference_unit = reference
                 if unit.dimensions != reference_unit.dimensions:

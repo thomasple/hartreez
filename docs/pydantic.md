@@ -122,15 +122,49 @@ is supplied. Normalization collisions, such as `timestep` alongside
 `timestep[fs]`, and key suffixes incompatible with a field's dimension also
 become validation errors.
 
-Optional fields can carry the dimension inside the union, as in
-`Annotated[float, UnitDimension("K")] | None` or
-`Optional[Annotated[float, UnitDimension("K")]]`; a suffixed value is then
-checked like a required field's. Every `UnitDimension` declared for a field,
-whether on the annotation itself or on its union members, must agree on the
-dimensions. A conflict is a model definition error: defining the class raises
-`TypeError`, independently of any input.
+### Where dimensions can be declared
 
-Fields without `UnitDimension` still follow ordinary mapping conversion when
-their input key is annotated and a system is supplied. Unannotated fields are
-left to normal Pydantic validation. Advanced validation-alias interactions
-are not covered by this integration's initial contract.
+`UnitDimension` can sit anywhere in a field's annotation, so a dimension
+named once as a type alias composes with optional, sequence, and nested
+types:
+
+```python
+from typing import Annotated
+
+from pydantic import Field
+
+from hartreez import UnitDimension
+from hartreez.pydantic import UnitAwareModel
+
+Length = Annotated[float, UnitDimension("angstrom")]
+
+
+class CellInput(UnitAwareModel):
+    positions: list[Length]
+    cell: tuple[Length, Length, Length]
+    cutoff: Length | None = None
+    skin: Annotated[Length | None, Field(gt=0)] = None
+```
+
+One suffix applies one conversion factor to the whole value, and lists and
+tuples are scaled element by element. A dimension declared on an element type
+is therefore the dimension of the whole field: `positions[nm]` converts every
+position. Every `UnitDimension` found in a field's annotation must agree on
+the dimensions. A field such as `tuple[Length, Time]` cannot be written with
+one suffix, so a conflict is a model definition error: defining the class
+raises `TypeError`, independently of any input. Nested `UnitAwareModel` types
+declare their own fields' dimensions, and `dict` values are not searched.
+
+Suffixed keys may use the field name or a string validation alias, including
+one set through `alias` or an `alias_generator`. `AliasPath` and
+`AliasChoices` are not supported.
+
+### Suffixes require a declared dimension
+
+A suffixed key is accepted only when it names a field whose annotation
+declares a `UnitDimension`. Any other suffixed key, such as `count[ps]` on an
+integer field, an unknown key, or a key reaching a field through
+`AliasChoices`, raises a `ValidationError` whose message says that no
+reference unit is declared for it. A value is never converted without its
+dimension being checked. Unsuffixed keys are left to normal Pydantic
+validation.

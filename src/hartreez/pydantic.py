@@ -7,8 +7,8 @@ Import this module explicitly to use :class:`UnitAwareModel`; the core
 from __future__ import annotations
 
 import types
-from collections.abc import Mapping
-from typing import Annotated, Any, ClassVar, Union, cast, get_args, get_origin
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, ValidationInfo, model_validator
 from pydantic.fields import FieldInfo
@@ -23,18 +23,29 @@ def _pointer_token(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
 
-def _field_dimension(name: str, model_field: FieldInfo) -> UnitDimension | None:
-    candidates = [m for m in model_field.metadata if isinstance(m, UnitDimension)]
+_UNION_ORIGINS: tuple[Any, ...] = (Union, types.UnionType)
+# One suffix scales every element of a list or tuple value, so a dimension
+# declared on the element type is the dimension of the whole field.
+_SEQUENCE_ORIGINS: tuple[Any, ...] = (list, tuple, set, frozenset, Sequence)
 
+
+def _declared_dimensions(annotation: Any) -> Iterator[UnitDimension]:
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        inner, *metadata = get_args(annotation)
+        yield from (m for m in metadata if isinstance(m, UnitDimension))
+        yield from _declared_dimensions(inner)
+    elif origin in _UNION_ORIGINS or origin in _SEQUENCE_ORIGINS:
+        for argument in get_args(annotation):
+            yield from _declared_dimensions(argument)
+
+
+def _field_dimension(name: str, model_field: FieldInfo) -> UnitDimension | None:
     # Pydantic only lifts Annotated metadata from the top of an annotation, so
-    # an optional field such as ``Annotated[float, UnitDimension("K")] | None``
-    # keeps its dimension inside the union members.
-    if get_origin(model_field.annotation) in (Union, types.UnionType):
-        for member in get_args(model_field.annotation):
-            if get_origin(member) is Annotated:
-                candidates.extend(
-                    m for m in get_args(member)[1:] if isinstance(m, UnitDimension)
-                )
+    # dimensions on union members such as ``Length | None`` or on element types
+    # such as ``list[Length]`` stay inside ``model_field.annotation``.
+    candidates = [m for m in model_field.metadata if isinstance(m, UnitDimension)]
+    candidates.extend(_declared_dimensions(model_field.annotation))
 
     if not candidates:
         return None
@@ -60,23 +71,36 @@ class UnitAwareModel(BaseModel):
 
     ``UnitDimension`` metadata is translated into ``reference_units`` checks,
     so the annotation's unit expression selects dimensions but never an output
-    scale. Canonical input without unit suffixes can be validated without a
-    context.
+    scale. A suffixed key must name a field that declares a ``UnitDimension``,
+    so no value is converted without a dimensional check. Canonical input
+    without unit suffixes can be validated without a context.
     """
-
-    # Resolved once per model class, so conflicting declarations fail when the
-    # class is defined rather than on whichever input first carries a suffix.
-    _unit_reference_units: ClassVar[dict[str, str]] = {}
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
         super().__pydantic_init_subclass__(**kwargs)
+        # Resolve once here so conflicting declarations fail when the class is
+        # defined rather than on whichever input first carries a suffix. The
+        # validator resolves again because model_rebuild() can still complete
+        # forward-referenced annotations.
+        cls._unit_reference_units()
+
+    @classmethod
+    def _unit_reference_units(cls) -> dict[str, str]:
         reference_units: dict[str, str] = {}
         for name, model_field in cls.model_fields.items():
             dimension = _field_dimension(name, model_field)
-            if dimension is not None:
-                reference_units[f"/{_pointer_token(name)}"] = dimension.expression
-        cls._unit_reference_units = reference_units
+            if dimension is None:
+                continue
+            # Input arrives under the validation alias, which Pydantic also
+            # fills from ``alias`` and ``alias_generator``. AliasPath and
+            # AliasChoices are not supported.
+            keys = [name]
+            if isinstance(model_field.validation_alias, str):
+                keys.append(model_field.validation_alias)
+            for key in keys:
+                reference_units.setdefault(f"/{_pointer_token(key)}", dimension.expression)
+        return reference_units
 
     @model_validator(mode="before")
     @classmethod
@@ -108,13 +132,14 @@ class UnitAwareModel(BaseModel):
             )
 
         try:
-            references = parse_reference_units(cls._unit_reference_units)
+            references = parse_reference_units(cls._unit_reference_units())
             return normalize_mapping_level(
                 raw_mapping,
                 system,
                 "$",
                 recurse=False,
                 references=references,
+                require_references=True,
             )
         except (MappingConversionError, ReferenceUnitsError) as exc:
             # A ValueError from a before validator is represented as a normal

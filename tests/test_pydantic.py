@@ -6,7 +6,8 @@ from copy import deepcopy
 from typing import Annotated, Optional
 
 import pytest
-from pydantic import Field, ValidationError, field_validator
+from pydantic import AliasChoices, ConfigDict, Field, ValidationError, field_validator
+from pydantic.alias_generators import to_camel
 
 from hartreez import UnitDimension, UnitSystem, au, parse_unit
 from hartreez.pydantic import UnitAwareModel
@@ -47,6 +48,41 @@ class ThresholdNestedInput(UnitAwareModel):
 class OptionalInput(UnitAwareModel):
     temperature: Annotated[float, UnitDimension("K")] | None = None
     timestep: Optional[Annotated[float, UnitDimension("fs")]] = None
+
+
+Length = Annotated[float, UnitDimension("angstrom")]
+
+
+class SequenceInput(UnitAwareModel):
+    positions: list[Length] = []
+    cell: tuple[Length, Length, Length] = (1.0, 1.0, 1.0)
+    shifts: tuple[Length, ...] = ()
+    grid: list[list[Length]] = []
+    cutoffs: list[Length] | None = None
+
+
+class AliasedInput(UnitAwareModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    cutoff_radius: Length = 1.0
+    skin: Length = Field(default=1.0, alias="rs")
+    buffer: Length = Field(default=1.0, validation_alias="rb")
+
+
+class ChoiceAliasInput(UnitAwareModel):
+    cutoff: Length = Field(default=1.0, validation_alias=AliasChoices("rc", "cut"))
+
+
+class ConstrainedAliasInput(UnitAwareModel):
+    skin: Annotated[Length | None, Field(gt=0)] | None = None
+
+
+class ForwardRefInput(UnitAwareModel):
+    cutoff: LaterLength
+
+
+LaterLength = Annotated[float, UnitDimension("angstrom")]
+ForwardRefInput.model_rebuild()
 
 
 def test_unit_dimension_is_immutable_and_represents_only_dimensions() -> None:
@@ -159,6 +195,85 @@ def test_conflicting_dimensions_are_rejected_when_the_model_is_defined() -> None
             value: Annotated[
                 Annotated[float, UnitDimension("fs")] | None, UnitDimension("K")
             ] = None
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("positions[ps]", [1.0, 2.0]),
+        ("cell[ps]", (1.0, 2.0, 3.0)),
+        ("shifts[ps]", (1.0,)),
+        ("grid[ps]", [[1.0], [2.0]]),
+        ("cutoffs[ps]", [1.0]),
+    ],
+)
+def test_dimensions_declared_on_sequence_elements_are_checked(
+    key: str, value: object
+) -> None:
+    with pytest.raises(ValidationError, match="dimensional mismatch"):
+        SequenceInput.model_validate({key: value}, context={"unit_system": au})
+
+
+def test_sequences_of_annotated_elements_convert_every_element() -> None:
+    nm = UnitSystem(length="nm", time="ps", energy="kJ/mol")
+
+    model = SequenceInput.model_validate(
+        {"positions[angstrom]": [10.0, 20.0], "cell[angstrom]": (10.0, 20.0, 30.0)},
+        context={"unit_system": nm},
+    )
+
+    assert model.positions == pytest.approx([1.0, 2.0])
+    assert model.cell == pytest.approx((1.0, 2.0, 3.0))
+
+
+def test_dimensions_nested_in_constrained_optional_aliases_are_checked() -> None:
+    with pytest.raises(ValidationError, match="dimensional mismatch"):
+        ConstrainedAliasInput.model_validate(
+            {"skin[ps]": 1.0}, context={"unit_system": au}
+        )
+
+
+@pytest.mark.parametrize(
+    "key", ["cutoffRadius[ps]", "cutoff_radius[ps]", "rs[ps]", "rb[ps]"]
+)
+def test_dimensions_are_checked_under_string_aliases(key: str) -> None:
+    with pytest.raises(ValidationError, match="dimensional mismatch"):
+        AliasedInput.model_validate({key: 1.0}, context={"unit_system": au})
+
+
+def test_aliased_fields_convert_their_suffixed_input() -> None:
+    nm = UnitSystem(length="nm", time="ps", energy="kJ/mol")
+
+    model = AliasedInput.model_validate(
+        {"cutoffRadius[angstrom]": 10.0, "rs[angstrom]": 20.0, "rb[angstrom]": 30.0},
+        context={"unit_system": nm},
+    )
+
+    assert model.cutoff_radius == pytest.approx(1.0)
+    assert model.skin == pytest.approx(2.0)
+    assert model.buffer == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize(
+    ("model", "key"),
+    [
+        (InputModel, "count[ps]"),
+        (InputModel, "undeclared[fs]"),
+        (ChoiceAliasInput, "rc[angstrom]"),
+    ],
+)
+def test_suffixed_keys_without_a_declared_dimension_are_rejected(
+    model: type[UnitAwareModel], key: str
+) -> None:
+    with pytest.raises(ValidationError, match="no reference unit declared"):
+        model.model_validate(
+            {"timestep": 1.0, key: 1.0}, context={"unit_system": au}
+        )
+
+
+def test_dimensions_resolved_by_model_rebuild_are_checked() -> None:
+    with pytest.raises(ValidationError, match="dimensional mismatch"):
+        ForwardRefInput.model_validate({"cutoff[ps]": 1.0}, context={"unit_system": au})
 
 
 def test_unannotated_fields_keep_normal_pydantic_conversion_semantics() -> None:
