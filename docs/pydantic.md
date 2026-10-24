@@ -167,8 +167,8 @@ a string validation alias, including one set through `alias` or an
 `alias_generator`, and the field name when the field has no alias or the model
 enables `validate_by_name` (or `populate_by_name`). A suffixed field name that
 Pydantic would ignore is rejected like any other undeclared key. Fields that
-share an input key must agree on its dimensions, otherwise defining the class
-raises `TypeError`. `AliasPath` and `AliasChoices` are not supported.
+share an input key must agree on its dimensions, and either all declare a
+`UnitDimension` or none do; otherwise defining the class raises `TypeError`. `AliasPath` and `AliasChoices` are not supported.
 
 ### Suffixes require a declared dimension
 

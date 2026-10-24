@@ -375,6 +375,38 @@ def test_plain_models_declaring_dimensions_are_rejected_when_nested(
         type("Outer", (UnitAwareModel,), {"__annotations__": {"particle": annotation}})
 
 
+def test_input_keys_shared_with_undimensioned_fields_are_rejected() -> None:
+    # The models are defined inside the test because defining them must fail.
+    with pytest.raises(TypeError, match="'length' and 'raw'"):
+
+        class SharedAlias(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            length: Length = Field(default=1.0, validation_alias="v")
+            raw: float = Field(default=1.0, validation_alias="v")
+
+    with pytest.raises(TypeError, match="'length' and 'raw'"):
+
+        class AliasOntoName(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            model_config = ConfigDict(populate_by_name=True)
+
+            length: Length = 1.0
+            raw: float = Field(default=1.0, validation_alias="length")
+
+    with pytest.raises(TypeError, match="'raw' and 'length'"):
+
+        class UndimensionedFirst(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            raw: float = Field(default=1.0, validation_alias="v")
+            length: Length = Field(default=1.0, validation_alias="v")
+
+
+def test_input_keys_shared_only_by_undimensioned_fields_are_allowed() -> None:
+    class SharedRaw(UnitAwareModel):
+        first: float = Field(default=0.0, validation_alias="v")
+        second: float = Field(default=0.0, validation_alias="v")
+
+    model = SharedRaw.model_validate({"v": 2.0})
+    assert (model.first, model.second) == (2.0, 2.0)
+
+
 def test_dimensions_resolved_by_model_rebuild_are_checked() -> None:
     with pytest.raises(ValidationError, match="dimensional mismatch"):
         ForwardRefInput.model_validate({"cutoff[ps]": 1.0}, context={"unit_system": au})

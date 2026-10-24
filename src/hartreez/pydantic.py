@@ -69,6 +69,10 @@ def _nested_plain_models(annotation: Any) -> Iterator[type[BaseModel]]:
         yield annotation
 
 
+def _describe(dimension: UnitDimension | None) -> str:
+    return "none" if dimension is None else repr(dimension.expression)
+
+
 def _field_dimension(name: str, model_field: FieldInfo) -> UnitDimension | None:
     # Pydantic only lifts Annotated metadata from the top of an annotation, so
     # dimensions on union members such as ``Length | None`` or on element types
@@ -123,7 +127,7 @@ class UnitAwareModel(BaseModel):
         by_name = config.get("validate_by_name", False) or config.get(
             "populate_by_name", False
         )
-        registered: dict[str, tuple[str, UnitDimension]] = {}
+        registered: dict[str, tuple[str, UnitDimension | None]] = {}
         for name, model_field in cls.model_fields.items():
             # Only UnitAwareModel converts its own level; a plain model would
             # ignore its suffixed keys and silently keep its defaults.
@@ -137,9 +141,9 @@ class UnitAwareModel(BaseModel):
                         f"UnitDimension fields but is not a UnitAwareModel; derive "
                         f"{nested.__name__} from UnitAwareModel"
                     )
+            # Fields without a dimension are registered too, so a key they share
+            # with a dimensioned field cannot hand them a converted value.
             dimension = _field_dimension(name, model_field)
-            if dimension is None:
-                continue
             # Input arrives under the validation alias, which Pydantic also
             # fills from ``alias`` and ``alias_generator``. AliasPath and
             # AliasChoices are not supported.
@@ -151,18 +155,21 @@ class UnitAwareModel(BaseModel):
                 keys.append(alias)
             for key in keys:
                 pointer = f"/{_pointer_token(key)}"
-                previous = registered.setdefault(pointer, (name, dimension))
+                previous_name, previous = registered.setdefault(pointer, (name, dimension))
                 # Pydantic fills every field that shares an input key, so one
                 # conversion factor must suit all of them.
-                if previous[1].dimensions != dimension.dimensions:
+                previous_dimensions = None if previous is None else previous.dimensions
+                dimensions = None if dimension is None else dimension.dimensions
+                if previous_dimensions != dimensions:
                     raise TypeError(
-                        f"input key {key!r} is shared by fields {previous[0]!r} and "
+                        f"input key {key!r} is shared by fields {previous_name!r} and "
                         f"{name!r} with conflicting UnitDimension metadata: "
-                        f"{previous[1].expression!r} and {dimension.expression!r}"
+                        f"{_describe(previous)} and {_describe(dimension)}"
                     )
         return {
             pointer: dimension.expression
             for pointer, (_, dimension) in registered.items()
+            if dimension is not None
         }
 
     @model_validator(mode="before")
