@@ -6,8 +6,9 @@ from copy import deepcopy
 from typing import Annotated, Optional
 
 import pytest
-from pydantic import AliasChoices, ConfigDict, Field, ValidationError, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic.alias_generators import to_camel
+from typing_extensions import TypeAliasType
 
 from hartreez import UnitDimension, UnitSystem, au, parse_unit
 from hartreez.pydantic import UnitAwareModel
@@ -86,6 +87,15 @@ class ChoiceAliasInput(UnitAwareModel):
 
 class ConstrainedAliasInput(UnitAwareModel):
     skin: Annotated[Length | None, Field(gt=0)] | None = None
+
+
+# ``type Distance = ...`` on Python 3.12+ creates the same TypeAliasType.
+Distance = TypeAliasType("Distance", Annotated[float, UnitDimension("angstrom")])
+
+
+class TypeAliasInput(UnitAwareModel):
+    cutoff: Distance = 1.0
+    positions: list[Distance] = []
 
 
 class ForwardRefInput(UnitAwareModel):
@@ -321,6 +331,48 @@ def test_input_keys_shared_with_conflicting_dimensions_are_rejected() -> None:
             time: Annotated[float, UnitDimension("fs")] = Field(
                 default=1.0, validation_alias="length"
             )
+
+
+def test_dimensions_declared_through_type_aliases_are_found() -> None:
+    nm = UnitSystem(length="nm", time="ps", energy="kJ/mol")
+
+    model = TypeAliasInput.model_validate(
+        {"cutoff[angstrom]": 10.0, "positions[angstrom]": [20.0]},
+        context={"unit_system": nm},
+    )
+    assert model.cutoff == pytest.approx(1.0)
+    assert model.positions == pytest.approx([2.0])
+
+    with pytest.raises(ValidationError, match="dimensional mismatch"):
+        TypeAliasInput.model_validate({"cutoff[ps]": 1.0}, context={"unit_system": nm})
+
+
+class PlainSettings(BaseModel):
+    label: str = ""
+
+
+class PlainParticle(BaseModel):
+    mass: Annotated[float, UnitDimension("Da")] = 1.0
+
+
+def test_plain_models_without_dimensions_can_be_nested() -> None:
+    class WithSettings(UnitAwareModel):
+        settings: PlainSettings
+
+    model = WithSettings.model_validate({"settings": {"label": "md"}})
+    assert model.settings.label == "md"
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [PlainParticle, list[PlainParticle], PlainParticle | None, dict[str, PlainParticle]],
+)
+def test_plain_models_declaring_dimensions_are_rejected_when_nested(
+    annotation: object,
+) -> None:
+    # A plain BaseModel would ignore its suffixed keys, leaving defaults behind.
+    with pytest.raises(TypeError, match="PlainParticle.*UnitAwareModel"):
+        type("Outer", (UnitAwareModel,), {"__annotations__": {"particle": annotation}})
 
 
 def test_dimensions_resolved_by_model_rebuild_are_checked() -> None:

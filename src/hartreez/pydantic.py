@@ -7,9 +7,11 @@ Import this module explicitly to use :class:`UnitAwareModel`; the core
 from __future__ import annotations
 
 import types
+import typing
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Annotated, Any, Union, cast, get_args, get_origin
 
+import typing_extensions
 from pydantic import BaseModel, ValidationInfo, model_validator
 from pydantic.fields import FieldInfo
 
@@ -29,7 +31,18 @@ _UNION_ORIGINS: tuple[Any, ...] = (Union, types.UnionType)
 _SEQUENCE_ORIGINS: tuple[Any, ...] = (list, tuple, set, frozenset, Sequence)
 
 
+# ``type Alias = ...`` creates typing.TypeAliasType on Python 3.12+, which
+# typing_extensions (a Pydantic dependency) may or may not re-export.
+_TYPE_ALIAS_TYPES: tuple[type, ...] = (
+    typing_extensions.TypeAliasType,
+    getattr(typing, "TypeAliasType", typing_extensions.TypeAliasType),
+)
+
+
 def _declared_dimensions(annotation: Any) -> Iterator[UnitDimension]:
+    if isinstance(annotation, _TYPE_ALIAS_TYPES):
+        yield from _declared_dimensions(annotation.__value__)
+        return
     origin = get_origin(annotation)
     if origin is Annotated:
         inner, *metadata = get_args(annotation)
@@ -38,6 +51,22 @@ def _declared_dimensions(annotation: Any) -> Iterator[UnitDimension]:
     elif origin in _UNION_ORIGINS or origin in _SEQUENCE_ORIGINS:
         for argument in get_args(annotation):
             yield from _declared_dimensions(argument)
+
+
+def _nested_plain_models(annotation: Any) -> Iterator[type[BaseModel]]:
+    if isinstance(annotation, _TYPE_ALIAS_TYPES):
+        yield from _nested_plain_models(annotation.__value__)
+        return
+    # Check generic aliases first: on Python 3.10, list[int] passes isinstance(type).
+    if get_origin(annotation) is not None:
+        for argument in get_args(annotation):
+            yield from _nested_plain_models(argument)
+    elif (
+        isinstance(annotation, type)
+        and issubclass(annotation, BaseModel)
+        and not issubclass(annotation, UnitAwareModel)
+    ):
+        yield annotation
 
 
 def _field_dimension(name: str, model_field: FieldInfo) -> UnitDimension | None:
@@ -96,6 +125,18 @@ class UnitAwareModel(BaseModel):
         )
         registered: dict[str, tuple[str, UnitDimension]] = {}
         for name, model_field in cls.model_fields.items():
+            # Only UnitAwareModel converts its own level; a plain model would
+            # ignore its suffixed keys and silently keep its defaults.
+            for nested in _nested_plain_models(model_field.annotation):
+                if any(
+                    _field_dimension(nested_name, nested_field) is not None
+                    for nested_name, nested_field in nested.model_fields.items()
+                ):
+                    raise TypeError(
+                        f"field {name!r} nests {nested.__name__}, which declares "
+                        f"UnitDimension fields but is not a UnitAwareModel; derive "
+                        f"{nested.__name__} from UnitAwareModel"
+                    )
             dimension = _field_dimension(name, model_field)
             if dimension is None:
                 continue

@@ -152,8 +152,15 @@ is therefore the dimension of the whole field: `positions[nm]` converts every
 position. Every `UnitDimension` found in a field's annotation must agree on
 the dimensions. A field such as `tuple[Length, Time]` cannot be written with
 one suffix, so a conflict is a model definition error: defining the class
-raises `TypeError`, independently of any input. Nested `UnitAwareModel` types
-declare their own fields' dimensions, and `dict` values are not searched.
+raises `TypeError`, independently of any input. Aliases created with the
+`type` statement (Python 3.12+) or `TypeAliasType` work like plain
+assignments. Nested `UnitAwareModel` types declare their own fields'
+dimensions, and `dict` values are not searched.
+
+A nested model must itself be a `UnitAwareModel` to convert its suffixed
+keys. A plain `BaseModel` would ignore them and keep its defaults, so nesting
+one that declares `UnitDimension` fields, directly or in a list, union, or
+`dict`, raises `TypeError` when the outer class is defined.
 
 Suffixed keys follow Pydantic's own rules for which input keys fill a field:
 a string validation alias, including one set through `alias` or an
