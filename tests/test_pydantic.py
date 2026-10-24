@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from copy import deepcopy
-from typing import Annotated
+from typing import Annotated, Optional
 
 import pytest
 from pydantic import Field, ValidationError, field_validator
@@ -42,6 +42,11 @@ class ThresholdParticleInput(UnitAwareModel):
 
 class ThresholdNestedInput(UnitAwareModel):
     particle: ThresholdParticleInput
+
+
+class OptionalInput(UnitAwareModel):
+    temperature: Annotated[float, UnitDimension("K")] | None = None
+    timestep: Optional[Annotated[float, UnitDimension("fs")]] = None
 
 
 def test_unit_dimension_is_immutable_and_represents_only_dimensions() -> None:
@@ -112,6 +117,42 @@ def test_dimensional_mismatch_and_normalization_collision_are_validation_errors(
     with pytest.raises(ValidationError, match="normalized key collision"):
         InputModel.model_validate(
             {"timestep": 1.0, "timestep[fs]": 1.0}, context={"unit_system": au}
+        )
+
+
+def test_optional_annotated_fields_are_dimension_checked() -> None:
+    md = UnitSystem(length="angstrom", time="ps", energy="kcal/mol")
+
+    with pytest.raises(ValidationError, match="dimensional mismatch"):
+        OptionalInput.model_validate(
+            {"temperature[ps]": 3.0}, context={"unit_system": md}
+        )
+
+
+def test_optional_annotated_fields_convert_or_stay_none() -> None:
+    md = UnitSystem(length="angstrom", time="ps", energy="kcal/mol")
+
+    model = OptionalInput.model_validate(
+        {"timestep[fs]": 100.0}, context={"unit_system": md}
+    )
+    assert model.timestep == pytest.approx(0.1)
+    assert model.temperature is None
+
+    with pytest.raises(ValidationError, match="dimensional mismatch"):
+        OptionalInput.model_validate(
+            {"timestep[K]": 1.0}, context={"unit_system": md}
+        )
+
+
+def test_union_members_with_conflicting_dimensions_are_rejected() -> None:
+    class ConflictingInput(UnitAwareModel):
+        value: Annotated[float, UnitDimension("fs")] | Annotated[
+            int, UnitDimension("eV")
+        ]
+
+    with pytest.raises(TypeError, match="conflicting UnitDimension"):
+        ConflictingInput.model_validate(
+            {"value[fs]": 1.0}, context={"unit_system": au}
         )
 
 

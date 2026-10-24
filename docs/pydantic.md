@@ -121,6 +121,13 @@ unconverted. The chosen field dimensions are checked when an annotated value
 is supplied. Normalization collisions, such as `timestep` alongside
 `timestep[fs]`, and incompatible annotations also become validation errors.
 
+Optional fields can carry the dimension inside the union, as in
+`Annotated[float, UnitDimension("K")] | None` or
+`Optional[Annotated[float, UnitDimension("K")]]`; a suffixed value is then
+checked like a required field's. If several union members declare
+`UnitDimension`, they must agree on the dimensions, otherwise validation of
+annotated input raises `TypeError`.
+
 Fields without `UnitDimension` still follow ordinary mapping conversion when
 their input key is annotated and a system is supplied. Unannotated fields are
 left to normal Pydantic validation. Advanced validation-alias interactions
