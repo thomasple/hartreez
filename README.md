@@ -11,7 +11,8 @@ numbers and arrays, with no quantity wrappers or core runtime dependencies.
 pip install hartreez
 ```
 
-Requires Python 3.10 or newer. For optional Pydantic v2 input validation:
+Requires Python 3.10 or newer. For optional Pydantic input validation
+(Pydantic 2.9 or newer):
 
 ```sh
 pip install 'hartreez[pydantic]'

@@ -12,23 +12,20 @@ from collections import deque
 from contextvars import ContextVar
 from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
-from typing import Annotated, Any, Union, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, Union, cast, get_args, get_origin
 
 import typing_extensions
-from pydantic import (
-    AliasChoices,
-    AliasPath,
-    BaseModel,
-    ModelWrapValidatorHandler,
-    ValidationInfo,
-    model_validator,
-)
+from pydantic import AliasChoices, AliasPath, BaseModel, ValidationInfo, model_validator
 from pydantic.fields import FieldInfo
 
 from hartreez.errors import MappingConversionError, ReferenceUnitsError
 from hartreez.mapping import normalize_mapping_level, parse_reference_units
 from hartreez.metadata import SCHEMA_METADATA_KEY, UnitDimension
 from hartreez.systems import UnitSystem
+
+if TYPE_CHECKING:
+    # Exported by Pydantic 2.10 and later; only needed for type checking.
+    from pydantic import ModelWrapValidatorHandler
 
 
 def _pointer_token(value: str) -> str:
