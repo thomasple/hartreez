@@ -229,3 +229,12 @@ try:
 except ValidationError as error:
     assert "'H[Da]' at $.masses" in str(error)
 ```
+
+This check sees only what the validated model keeps. A plain nested
+`BaseModel` applies its own `extra` policy to a suffixed key as to any key it
+does not declare: under Pydantic's default `extra="ignore"`, the key is
+dropped and the field keeps its default, as a misspelled key would. A
+`UnitAwareModel` rejects such a key at its own level whatever its `extra`
+policy, so make a nested model a `UnitAwareModel` when its input may carry
+suffixes. For models that read input files, set `extra="forbid"` at every
+level to reject misspelled and stray suffixed keys alike.
