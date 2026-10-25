@@ -942,3 +942,61 @@ def test_a_nested_models_own_validator_may_rename_suffixed_keys() -> None:
 
     model = Holder.model_validate({"particle": {"m[Da]": 1.0}}, context={"unit_system": au})
     assert model.particle.mass == pytest.approx(au.factor_from("Da"))
+
+
+class SharedInput(UnitAwareModel):
+    particle: ParticleInput
+    raw: Any = None
+    plain: Optional[PlainMass] = None
+
+
+@pytest.mark.parametrize(
+    ("second", "location"),
+    [
+        # Kept unconverted in an Any field.
+        ("raw", r"\$\.particle"),
+        # Dropped as unknown keys by a plain model.
+        ("plain", r"\$\.particle"),
+    ],
+)
+def test_a_mapping_used_twice_must_be_converted_at_each_place(
+    second: str, location: str
+) -> None:
+    shared = {"mass[Da]": 1.0, "momentum": 0.0}
+    with pytest.raises(ValidationError, match=rf"'mass\[Da\]' at {location}.*appears 2 times"):
+        SharedInput.model_validate(
+            {"particle": shared, second: shared}, context={"unit_system": au}
+        )
+
+
+def test_suffixed_mappings_inside_any_sequence_are_found() -> None:
+    from collections import deque
+
+    with pytest.raises(ValidationError, match=r"'mass\[Da\]' at \$\.value\[0\]"):
+        _outer(Any).model_validate(
+            {"value": deque([{"mass[Da]": 1.0}])}, context={"unit_system": au}
+        )
+
+
+def test_heavily_shared_input_is_walked_once_per_object() -> None:
+    # 40 levels of a list holding its child twice: 2**40 paths, 40 objects.
+    value: Any = {"mass": 1.0}
+    for _ in range(40):
+        value = [value, value]
+    _outer(Any).model_validate({"value": value}, context={"unit_system": au})
+
+
+def test_validators_that_change_a_suffixed_value_type_are_rejected() -> None:
+    # True == 1.0 in Python, but the value changed, so the copy matches no input.
+    class Retyping(UnitAwareModel):
+        particle: ParticleInput
+
+        @field_validator("particle", mode="before")
+        @classmethod
+        def to_float(cls, value: Any) -> Any:
+            return {k: (float(v) if isinstance(v, bool) else v) for k, v in value.items()}
+
+    with pytest.raises(ValidationError, match=r"'mass\[Da\]' at \$\.particle"):
+        Retyping.model_validate(
+            {"particle": {"mass[Da]": True, "momentum": 0.0}}, context={"unit_system": au}
+        )

@@ -229,7 +229,10 @@ result. Otherwise validation fails with a message naming the key's path.
 This covers a key that would stay in a `dict` field, an `Any` field, or an
 extra value with its value unconverted, and a key that a plain model,
 dataclass, or `TypedDict` would drop as unknown, leaving its default behind,
-whatever their `extra` policy:
+whatever their `extra` policy. A mapping object used at several places in
+the input must be converted at each of them. Mappings are searched for inside
+other mappings and any sequence, such as a list, a tuple, or a `deque`; other
+iterables, such as generators, are not iterated:
 
 ```python
 from pydantic import ValidationError
@@ -288,9 +291,10 @@ water = Composition.model_validate(
 )
 ```
 
-A validator must not rename a suffixed key or change its value, for example
-to migrate a legacy key such as `m[Da]` to `mass[Da]`: the result matches no
-input mapping, so validation fails. Do such changes in the nested model's own
+A validator must not rename a suffixed key, for example to migrate a legacy
+key such as `m[Da]` to `mass[Da]`, or change a suffixed value, even only its
+type, such as `True` to `1.0`: the result matches no input mapping, so
+validation fails. Do such changes in the nested model's own
 `model_validator(mode="before")`, which receives its input after the match.
 Suffixed entries that end up in no `UnitAwareModel`, such as defaults that no
 nested model receives, are reported like any other unconverted key.

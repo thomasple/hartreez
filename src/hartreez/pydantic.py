@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import types
 import typing
-from collections import deque
+from collections import Counter, deque
 from contextvars import ContextVar
 from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -182,8 +182,26 @@ def _child_path(path: str, key: Any) -> str:
     return f"{path}[{key!r}]"
 
 
+@dataclass
+class _PendingMapping:
+    """A raw input mapping holding a suffixed key, which models must convert."""
+
+    mapping: Mapping[Any, Any]
+    # Path of its first occurrence in the input, and its first suffixed key.
+    path: str
+    key: str
+    # How often the mapping object appears in the input. Each occurrence
+    # needs its own UnitAwareModel in the result.
+    occurrences: int = 0
+    # Occurrences not yet matched to a nested model, by identity or as a copy.
+    unmatched: int = 0
+
+
+# Shared empty result of _SuffixLedger._record; never updated.
+_NO_COUNTS: Counter[int] = Counter()
+
 # Suffixed key set -> signature of their values -> pending mappings by id.
-_Unmatched = dict[frozenset[str], dict[Hashable, dict[int, Mapping[Any, Any]]]]
+_Buckets = dict[frozenset[str], dict[Hashable, dict[int, _PendingMapping]]]
 
 
 @dataclass
@@ -196,58 +214,129 @@ class _SuffixLedger:
     removed, which is matched by its unchanged suffixed entries.
     """
 
-    # id of each raw mapping holding a suffixed key -> (path, first such key).
-    pending: dict[int, tuple[str, str]] = field(default_factory=dict[int, tuple[str, str]])
-    # Pending mappings no copy or identity match has claimed yet.
-    unmatched: _Unmatched = field(default_factory=_Unmatched)
+    # Pending mappings by id.
+    pending: dict[int, _PendingMapping] = field(default_factory=dict[int, _PendingMapping])
+    # Pending mappings with unmatched occurrences, for matching copies.
+    buckets: _Buckets = field(default_factory=_Buckets)
     # id of each copy -> id of the pending mapping it was matched to, if any.
     copies: dict[int, int | None] = field(default_factory=dict[int, int | None])
-    # id of each nested UnitAwareModel instance -> id of its raw input.
+    # id of each nested UnitAwareModel instance -> id of the pending mapping
+    # it was built from.
     sources: dict[int, int] = field(default_factory=dict[int, int])
     # Keeps recorded objects alive so their ids stay unique until the check.
     keep: list[Any] = field(default_factory=list[Any])
 
-    def add(self, mapping: Mapping[Any, Any], path: str, key: str) -> None:
-        """Record a raw mapping that holds the suffixed ``key``."""
+    def record(self, data: Mapping[Any, Any]) -> None:
+        """Record every suffixed mapping below the root input ``data``."""
 
-        self.pending[id(mapping)] = (path, key)
-        self._bucket(mapping, _suffixed_keys(mapping))[id(mapping)] = mapping
-        self.keep.append(mapping)
+        counts = Counter[int]()
+        # The root's own keys are converted or rejected by its before hook.
+        ancestors = {id(data)}
+        memo: dict[int, Counter[int]] = {}
+        for key, value in data.items():
+            counts.update(self._record(value, _child_path("$", key), ancestors, memo))
+        for mapping_id, occurrences in counts.items():
+            entry = self.pending[mapping_id]
+            entry.occurrences = entry.unmatched = occurrences
+            self._bucket(entry.mapping, _suffixed_keys(entry.mapping))[mapping_id] = entry
+
+    def _record(
+        self, value: Any, path: str, ancestors: set[int], memo: dict[int, Counter[int]]
+    ) -> Counter[int]:
+        # Returns how often each pending mapping occurs below ``value``. A
+        # value shared by several parents is walked once and counted at each
+        # of them. Paths and counters are only built where needed, since most
+        # containers in numeric input hold only numbers.
+        value_id = id(value)
+        if value_id in memo:
+            return memo[value_id]
+        if value_id in ancestors:
+            return _NO_COUNTS
+        counts: Counter[int] | None = None
+        if isinstance(value, Mapping):
+            mapping = cast(Mapping[Any, Any], value)
+            suffixed = next((key for key in mapping if _has_unit_suffix(key)), None)
+            if suffixed is not None:
+                self.pending[value_id] = _PendingMapping(mapping, path, suffixed)
+                self.keep.append(mapping)
+                counts = Counter({value_id: 1})
+            children = cast(Iterable[tuple[Any, Any]], mapping.items())
+            keyed = True
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            # Any sequence, including a deque, can hold nested mappings.
+            # Other iterables are not iterated, since that could consume them.
+            children = enumerate(cast(Sequence[Any], value))
+            keyed = False
+        else:
+            return _NO_COUNTS
+        ancestors.add(value_id)
+        for key, child in children:
+            if isinstance(child, (float, int, str)):
+                continue
+            child_path = _child_path(path, key) if keyed else f"{path}[{key}]"
+            found = self._record(child, child_path, ancestors, memo)
+            if not found:
+                continue
+            if counts is None:
+                counts = Counter(found)
+            else:
+                counts.update(found)
+        ancestors.discard(value_id)
+        result = _NO_COUNTS if counts is None else counts
+        memo[value_id] = result
+        return result
 
     def source_of(self, data: Any) -> int | None:
         """Return the id of the pending mapping ``data`` is, or is a copy of."""
 
         data_id = id(data)
         if data_id in self.pending:
-            # Matched by identity, so no copy can claim it as well.
-            self._bucket(data, _suffixed_keys(data)).pop(data_id, None)
+            self._claim(self.pending[data_id], data_id)
             return data_id
         if data_id not in self.copies:
             self.copies[data_id] = self._match_copy(data)
             self.keep.append(data)
         return self.copies[data_id]
 
-    def _bucket(self, mapping: Mapping[Any, Any], keys: frozenset[str]) -> dict[int, Mapping[Any, Any]]:
+    def unconverted(self, result: Any) -> tuple[_PendingMapping, int] | None:
+        """Return a pending mapping with fewer models in ``result`` than occurrences.
+
+        The count returned is how many models in the result were built from it.
+        """
+
+        converted = Counter[int]()
+        _count_sources(result, self, converted, set())
+        for mapping_id, entry in self.pending.items():
+            if converted[mapping_id] < entry.occurrences:
+                return entry, converted[mapping_id]
+        return None
+
+    def _claim(self, entry: _PendingMapping, mapping_id: int) -> None:
+        # Once every occurrence is matched, no copy can claim the mapping.
+        entry.unmatched -= 1
+        if entry.unmatched <= 0:
+            self._bucket(entry.mapping, _suffixed_keys(entry.mapping)).pop(mapping_id, None)
+
+    def _bucket(self, mapping: Mapping[Any, Any], keys: frozenset[str]) -> dict[int, _PendingMapping]:
         # Unhashable values share one bucket, searched by comparison.
-        return self.unmatched.setdefault(keys, {}).setdefault(_signature(mapping, keys), {})
+        return self.buckets.setdefault(keys, {}).setdefault(_signature(mapping, keys), {})
 
     def _match_copy(self, data: Any) -> int | None:
         # A copy holds every suffixed entry of the pending mapping it came
         # from, unchanged; other keys may have been added or removed. Each
-        # pending mapping is matched by at most one copy, preferring the one
-        # with the most suffixed entries.
+        # occurrence of a pending mapping is matched by at most one copy,
+        # preferring the mapping with the most suffixed entries.
         if not isinstance(data, Mapping):
             return None
         mapping = cast(Mapping[Any, Any], data)
         keys = _suffixed_keys(mapping)
         if not keys:
             return None
-        groups = [group for group in self.unmatched if group <= keys]
+        groups = [group for group in self.buckets if group <= keys]
         for group in sorted(groups, key=len, reverse=True):
-            candidates = self._bucket(mapping, group)
-            for candidate_id, candidate in candidates.items():
-                if all(_same_value(candidate[key], mapping[key]) for key in group):
-                    del candidates[candidate_id]
+            for candidate_id, entry in list(self._bucket(mapping, group).items()):
+                if all(_same_value(entry.mapping[key], mapping[key]) for key in group):
+                    self._claim(entry, candidate_id)
                     return candidate_id
         return None
 
@@ -274,8 +363,19 @@ def _signature(mapping: Mapping[Any, Any], keys: frozenset[str]) -> Hashable:
 
 
 def _same_value(left: Any, right: Any) -> bool:
+    """Whether a suffixed value is unchanged, including its type."""
+
+    if left is right:
+        return True
+    # True == 1.0 in Python, but a value of another type has been changed.
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, (list, tuple)):
+        items = cast(Sequence[Any], left)
+        others = cast(Sequence[Any], right)
+        return len(items) == len(others) and all(map(_same_value, items, others))
     try:
-        return bool(left is right or left == right)
+        return bool(left == right)
     except Exception:
         # e.g. NumPy arrays, whose comparison has no single truth value.
         return False
@@ -284,30 +384,8 @@ def _same_value(left: Any, right: Any) -> bool:
 _LEDGER: ContextVar[_SuffixLedger | None] = ContextVar("hartreez_suffix_ledger", default=None)
 
 
-def _record_suffixed_mappings(value: Any, path: str, ledger: _SuffixLedger, seen: set[int]) -> None:
-    """Record every raw mapping below ``value`` that holds a suffixed key."""
-
-    value_id = id(value)
-    if value_id in seen:
-        return
-    if isinstance(value, Mapping):
-        seen.add(value_id)
-        mapping = cast(Mapping[Any, Any], value)
-        suffixed = next((key for key in mapping if _has_unit_suffix(key)), None)
-        if suffixed is not None:
-            ledger.add(mapping, path, suffixed)
-        for key, item in mapping.items():
-            if not isinstance(item, (float, int, str)):
-                _record_suffixed_mappings(item, _child_path(path, key), ledger, seen)
-    elif isinstance(value, (list, tuple)):
-        seen.add(value_id)
-        for index, item in enumerate(cast(Iterable[Any], value)):
-            if not isinstance(item, (float, int, str)):
-                _record_suffixed_mappings(item, f"{path}[{index}]", ledger, seen)
-
-
-def _collect_sources(value: Any, ledger: _SuffixLedger, owned: set[int], seen: set[int]) -> None:
-    """Collect the raw inputs of the UnitAwareModels kept in a validated value."""
+def _count_sources(value: Any, ledger: _SuffixLedger, converted: Counter[int], seen: set[int]) -> None:
+    """Count the pending mappings the UnitAwareModels in a validated value came from."""
 
     if id(value) in seen:
         return
@@ -315,7 +393,7 @@ def _collect_sources(value: Any, ledger: _SuffixLedger, owned: set[int], seen: s
     children: Iterable[Any]
     if isinstance(value, BaseModel):
         if isinstance(value, UnitAwareModel) and id(value) in ledger.sources:
-            owned.add(ledger.sources[id(value)])
+            converted[ledger.sources[id(value)]] += 1
         children = _model_items(value).values()
     elif is_dataclass(value) and not isinstance(value, type):
         children = (getattr(value, item.name) for item in fields(value))
@@ -327,7 +405,7 @@ def _collect_sources(value: Any, ledger: _SuffixLedger, owned: set[int], seen: s
         return
     for child in children:
         if not isinstance(child, (float, int, str)):
-            _collect_sources(child, ledger, owned, seen)
+            _count_sources(child, ledger, converted, seen)
 
 
 # Core schema nodes that validate a class from a mapping, keeping only the
@@ -556,12 +634,8 @@ class UnitAwareModel(BaseModel):
             return instance
 
         ledger = _SuffixLedger()
-        # The root's own keys are converted or rejected by its before hook.
-        root_id = id(data)
         if isinstance(data, Mapping):
-            seen: set[int] = {root_id}
-            for key, value in cast(Mapping[Any, Any], data).items():
-                _record_suffixed_mappings(value, _child_path("$", key), ledger, seen)
+            ledger.record(cast(Mapping[Any, Any], data))
         token = _LEDGER.set(ledger)
         try:
             instance = handler(data)
@@ -570,14 +644,20 @@ class UnitAwareModel(BaseModel):
         if not ledger.pending:
             return instance
 
-        owned: set[int] = set()
-        _collect_sources(instance, ledger, owned, set())
-        for mapping_id, (path, key) in ledger.pending.items():
-            if mapping_id not in owned:
-                raise ValueError(
-                    f"key {key!r} at {path} has a unit suffix, but no UnitAwareModel "
-                    "in the result converted it"
+        found = ledger.unconverted(instance)
+        if found is not None:
+            entry, converted = found
+            message = (
+                f"key {entry.key!r} at {entry.path} has a unit suffix, but no "
+                "UnitAwareModel in the result converted it"
+            )
+            if entry.occurrences > 1:
+                message = (
+                    f"key {entry.key!r} at {entry.path} has a unit suffix, and its "
+                    f"mapping appears {entry.occurrences} times in the input, but only "
+                    f"{converted} UnitAwareModel(s) in the result converted it"
                 )
+            raise ValueError(message)
         return instance
 
 
