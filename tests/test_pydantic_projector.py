@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Sequence
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from typing_extensions import TypeAliasType
 
 from hartreez import UnitDimension, UnitSystem, au
@@ -15,6 +15,9 @@ from hartreez.pydantic import UnitAwareModel
 Length = Annotated[float, UnitDimension("angstrom")]
 Time = Annotated[float, UnitDimension("ps")]
 Distance = TypeAliasType("Distance", Length)
+T = TypeVar("T")
+# ``type Vector[T] = list[T]`` on Python 3.12+ creates the same generic alias.
+Vector = TypeAliasType("Vector", list[T], type_params=(T,))
 
 
 class ProjectedInput(UnitAwareModel):
@@ -64,6 +67,7 @@ def test_projected_dimension_is_checked_before_pydantic_validation() -> None:
         deque[Length],
         Length | str,
         tuple[Length, int],
+        Vector[Length],
     ],
 )
 def test_dimension_inside_unsupported_shape_fails_at_model_definition(
@@ -95,3 +99,16 @@ def test_same_dimension_can_be_repeated_at_multiple_annotation_levels() -> None:
         {"value[angstrom]": 10.0}, context={"unit_system": nm}
     )
     assert model.value == pytest.approx(1.0)
+
+
+class PlainParticle(BaseModel):
+    mass: Annotated[float, UnitDimension("Da")] = 1.0
+
+
+def test_plain_models_with_dimensions_are_found_through_generic_aliases() -> None:
+    with pytest.raises(TypeError, match="PlainParticle.*UnitAwareModel"):
+        type(
+            "Outer",
+            (UnitAwareModel,),
+            {"__annotations__": {"particles": Vector[PlainParticle]}},
+        )

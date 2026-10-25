@@ -203,7 +203,7 @@ def test_optional_annotated_fields_convert_or_stay_none() -> None:
 
 def test_conflicting_dimensions_are_rejected_when_the_model_is_defined() -> None:
     # The models are defined inside the test because defining them must fail.
-    with pytest.raises(TypeError, match="conflicting UnitDimension"):
+    with pytest.raises(TypeError, match="only Optional"):
 
         class ConflictingMembers(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
             value: Annotated[float, UnitDimension("fs")] | Annotated[

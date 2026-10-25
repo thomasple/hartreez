@@ -38,6 +38,22 @@ _TYPE_ALIAS_TYPES: tuple[type, ...] = (
 )
 
 
+def _is_type_alias(annotation: Any) -> bool:
+    # On Python 3.10, a generic alias such as ``Vector[Length]`` also passes the
+    # isinstance check, but its __value__ still holds the unsubstituted
+    # parameters, so only an alias without arguments is expanded.
+    return isinstance(annotation, _TYPE_ALIAS_TYPES) and get_origin(annotation) is None
+
+
+def _alias_arguments(annotation: Any) -> tuple[Any, ...]:
+    # The arguments of an annotation, plus the body of a generic type alias.
+    arguments = get_args(annotation)
+    origin = get_origin(annotation)
+    if isinstance(origin, _TYPE_ALIAS_TYPES):
+        arguments += (origin.__value__,)
+    return arguments
+
+
 def _contains_unit_dimension(annotation: Any) -> bool:
     """Whether ``annotation`` contains UnitDimension metadata anywhere.
 
@@ -46,7 +62,7 @@ def _contains_unit_dimension(annotation: Any) -> bool:
     semantics beyond finding the marker.
     """
 
-    if isinstance(annotation, _TYPE_ALIAS_TYPES):
+    if _is_type_alias(annotation):
         return _contains_unit_dimension(annotation.__value__)
     origin = get_origin(annotation)
     if origin is Annotated:
@@ -54,7 +70,7 @@ def _contains_unit_dimension(annotation: Any) -> bool:
         return any(isinstance(item, UnitDimension) for item in metadata) or (
             _contains_unit_dimension(inner)
         )
-    return any(_contains_unit_dimension(argument) for argument in get_args(annotation))
+    return any(_contains_unit_dimension(argument) for argument in _alias_arguments(annotation))
 
 
 def _merge_dimensions(
@@ -82,7 +98,7 @@ def _project_dimension(name: str, annotation: Any) -> UnitDimension | None:
     Any other shape containing UnitDimension metadata is rejected loudly.
     """
 
-    if isinstance(annotation, _TYPE_ALIAS_TYPES):
+    if _is_type_alias(annotation):
         return _project_dimension(name, annotation.__value__)
 
     origin = get_origin(annotation)
@@ -137,12 +153,12 @@ def _project_dimension(name: str, annotation: Any) -> UnitDimension | None:
 
 
 def _nested_plain_models(annotation: Any) -> Iterator[type[BaseModel]]:
-    if isinstance(annotation, _TYPE_ALIAS_TYPES):
+    if _is_type_alias(annotation):
         yield from _nested_plain_models(annotation.__value__)
         return
     # Check generic aliases first: on Python 3.10, list[int] passes isinstance(type).
     if get_origin(annotation) is not None:
-        for argument in get_args(annotation):
+        for argument in _alias_arguments(annotation):
             yield from _nested_plain_models(argument)
     elif (
         isinstance(annotation, type)
