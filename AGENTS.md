@@ -1,3 +1,7 @@
+## Changelog
+
+Every PR with a user-visible change adds an entry under `## Unreleased` in `CHANGELOG.md`, under `Added`, `Changed`, `Fixed` or `Removed`. Start breaking changes with **Breaking:**.
+
 ## Agent skills
 
 ### Issue tracker

@@ -35,6 +35,7 @@ classifiers = [
 Repository = "https://github.com/thomasple/hartreez"
 Issues = "https://github.com/thomasple/hartreez/issues"
 Documentation = "https://github.com/thomasple/hartreez/tree/main/docs"
+Changelog = "https://github.com/thomasple/hartreez/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
