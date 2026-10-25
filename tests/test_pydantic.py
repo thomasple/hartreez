@@ -280,7 +280,6 @@ def test_aliased_fields_convert_their_suffixed_input() -> None:
     [
         (InputModel, "count[ps]"),
         (InputModel, "undeclared[fs]"),
-        (ChoiceAliasInput, "rc[angstrom]"),
     ],
 )
 def test_suffixed_keys_without_a_declared_dimension_are_rejected(
@@ -290,6 +289,19 @@ def test_suffixed_keys_without_a_declared_dimension_are_rejected(
         model.model_validate(
             {"timestep": 1.0, key: 1.0}, context={"unit_system": au}
         )
+
+
+@pytest.mark.parametrize("key", ["rc", "cut"])
+def test_every_alias_choice_converts_its_suffixed_input(key: str) -> None:
+    nm = UnitSystem(length="nm", time="ps", energy="kJ/mol")
+
+    model = ChoiceAliasInput.model_validate(
+        {f"{key}[angstrom]": 10.0}, context={"unit_system": nm}
+    )
+    assert model.cutoff == pytest.approx(1.0)
+
+    with pytest.raises(ValidationError, match="dimensional mismatch"):
+        ChoiceAliasInput.model_validate({f"{key}[ps]": 1.0}, context={"unit_system": nm})
 
 
 def test_field_names_follow_pydantic_alias_configuration() -> None:
@@ -390,6 +402,12 @@ def test_input_keys_shared_with_undimensioned_fields_are_rejected() -> None:
 
             length: Length = 1.0
             raw: float = Field(default=1.0, validation_alias="length")
+
+    with pytest.raises(TypeError, match="'length' and 'raw'"):
+
+        class SharedChoice(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            length: Length = Field(default=1.0, validation_alias="v")
+            raw: float = Field(default=1.0, validation_alias=AliasChoices("w", "v"))
 
     with pytest.raises(TypeError, match="'raw' and 'length'"):
 

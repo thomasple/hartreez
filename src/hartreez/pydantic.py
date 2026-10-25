@@ -12,7 +12,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 import typing_extensions
-from pydantic import BaseModel, ValidationInfo, model_validator
+from pydantic import AliasChoices, BaseModel, ValidationInfo, model_validator
 from pydantic.fields import FieldInfo
 
 from hartreez.errors import MappingConversionError, ReferenceUnitsError
@@ -239,14 +239,16 @@ class UnitAwareModel(BaseModel):
             # with a dimensioned field cannot hand them a converted value.
             dimension = _field_dimension(name, model_field)
             # Input arrives under the validation alias, which Pydantic also
-            # fills from ``alias`` and ``alias_generator``. AliasPath and
-            # AliasChoices are not supported.
+            # fills from ``alias`` and ``alias_generator``. AliasPath is not
+            # supported.
             alias = model_field.validation_alias
             keys: list[str] = []
             if alias is None or by_name:
                 keys.append(name)
             if isinstance(alias, str) and by_alias:
                 keys.append(alias)
+            if isinstance(alias, AliasChoices) and by_alias:
+                keys.extend(choice for choice in alias.choices if isinstance(choice, str))
             for key in keys:
                 pointer = f"/{_pointer_token(key)}"
                 previous_name, previous = registered.setdefault(pointer, (name, dimension))
