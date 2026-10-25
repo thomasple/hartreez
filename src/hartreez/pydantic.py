@@ -26,9 +26,8 @@ def _pointer_token(value: str) -> str:
 
 
 _UNION_ORIGINS: tuple[Any, ...] = (Union, types.UnionType)
-# One suffix scales every element of a list or tuple value, so a dimension
-# declared on the element type is the dimension of the whole field.
-_SEQUENCE_ORIGINS: tuple[Any, ...] = (list, tuple, set, frozenset, Sequence)
+_SEQUENCE_ORIGINS: tuple[Any, ...] = (list, set, frozenset, Sequence)
+_NONE_TYPE = type(None)
 
 
 # ``type Alias = ...`` creates typing.TypeAliasType on Python 3.12+, which
@@ -39,18 +38,102 @@ _TYPE_ALIAS_TYPES: tuple[type, ...] = (
 )
 
 
-def _declared_dimensions(annotation: Any) -> Iterator[UnitDimension]:
+def _contains_unit_dimension(annotation: Any) -> bool:
+    """Whether ``annotation`` contains UnitDimension metadata anywhere.
+
+    This is only a guard for unsupported annotation shapes: supported shapes are
+    interpreted by ``_project_dimension`` below. It deliberately understands no
+    semantics beyond finding the marker.
+    """
+
     if isinstance(annotation, _TYPE_ALIAS_TYPES):
-        yield from _declared_dimensions(annotation.__value__)
-        return
+        return _contains_unit_dimension(annotation.__value__)
     origin = get_origin(annotation)
     if origin is Annotated:
         inner, *metadata = get_args(annotation)
-        yield from (m for m in metadata if isinstance(m, UnitDimension))
-        yield from _declared_dimensions(inner)
-    elif origin in _UNION_ORIGINS or origin in _SEQUENCE_ORIGINS:
-        for argument in get_args(annotation):
-            yield from _declared_dimensions(argument)
+        return any(isinstance(item, UnitDimension) for item in metadata) or (
+            _contains_unit_dimension(inner)
+        )
+    return any(_contains_unit_dimension(argument) for argument in get_args(annotation))
+
+
+def _merge_dimensions(
+    name: str, dimensions: list[UnitDimension]
+) -> UnitDimension | None:
+    if not dimensions:
+        return None
+    first = dimensions[0]
+    for other in dimensions[1:]:
+        if other.dimensions != first.dimensions:
+            raise TypeError(
+                f"field {name!r} declares conflicting UnitDimension metadata: "
+                f"{first.expression!r} and {other.expression!r}"
+            )
+    return first
+
+
+def _project_dimension(name: str, annotation: Any) -> UnitDimension | None:
+    """Project supported dimensional annotations onto their containing field.
+
+    A unit suffix belongs to the field's input key, so a nested UnitDimension is
+    useful only when the whole field has one unambiguous dimension. Supported
+    structure is intentionally small: Annotated, type aliases, Optional[T],
+    homogeneous list/set/frozenset/Sequence containers, and homogeneous tuples.
+    Any other shape containing UnitDimension metadata is rejected loudly.
+    """
+
+    if isinstance(annotation, _TYPE_ALIAS_TYPES):
+        return _project_dimension(name, annotation.__value__)
+
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        inner, *metadata = get_args(annotation)
+        dimensions = [item for item in metadata if isinstance(item, UnitDimension)]
+        inner_dimension = _project_dimension(name, inner)
+        if inner_dimension is not None:
+            dimensions.append(inner_dimension)
+        return _merge_dimensions(name, dimensions)
+
+    if origin in _UNION_ORIGINS:
+        arguments = get_args(annotation)
+        non_none = [argument for argument in arguments if argument is not _NONE_TYPE]
+        if len(non_none) == 1 and len(non_none) != len(arguments):
+            return _project_dimension(name, non_none[0])
+        if _contains_unit_dimension(annotation):
+            raise TypeError(
+                f"field {name!r} contains UnitDimension inside an unsupported union; "
+                "only Optional[T] is supported"
+            )
+        return None
+
+    if origin in _SEQUENCE_ORIGINS:
+        arguments = get_args(annotation)
+        if not arguments:
+            return None
+        return _project_dimension(name, arguments[0])
+
+    if origin is tuple:
+        arguments = get_args(annotation)
+        if not arguments:
+            return None
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            return _project_dimension(name, arguments[0])
+        projected = [_project_dimension(name, argument) for argument in arguments]
+        present = [dimension for dimension in projected if dimension is not None]
+        if not present:
+            return None
+        if len(present) != len(projected):
+            raise TypeError(
+                f"field {name!r} mixes dimensioned and undimensioned tuple elements"
+            )
+        return _merge_dimensions(name, present)
+
+    if _contains_unit_dimension(annotation):
+        raise TypeError(
+            f"field {name!r} contains UnitDimension inside unsupported annotation "
+            f"{annotation!r}"
+        )
+    return None
 
 
 def _nested_plain_models(annotation: Any) -> Iterator[type[BaseModel]]:
@@ -74,22 +157,16 @@ def _describe(dimension: UnitDimension | None) -> str:
 
 
 def _field_dimension(name: str, model_field: FieldInfo) -> UnitDimension | None:
-    # Pydantic only lifts Annotated metadata from the top of an annotation, so
-    # dimensions on union members such as ``Length | None`` or on element types
-    # such as ``list[Length]`` stay inside ``model_field.annotation``.
-    candidates = [m for m in model_field.metadata if isinstance(m, UnitDimension)]
-    candidates.extend(_declared_dimensions(model_field.annotation))
-
-    if not candidates:
-        return None
-    first = candidates[0]
-    for other in candidates[1:]:
-        if other.dimensions != first.dimensions:
-            raise TypeError(
-                f"field {name!r} declares conflicting UnitDimension metadata: "
-                f"{first.expression!r} and {other.expression!r}"
-            )
-    return first
+    # Pydantic lifts top-level Annotated metadata into FieldInfo.metadata. Nested
+    # aliases and containers remain in model_field.annotation and are projected
+    # onto the containing field by the deliberately small grammar above.
+    dimensions = [
+        item for item in model_field.metadata if isinstance(item, UnitDimension)
+    ]
+    projected = _project_dimension(name, model_field.annotation)
+    if projected is not None:
+        dimensions.append(projected)
+    return _merge_dimensions(name, dimensions)
 
 
 class UnitAwareModel(BaseModel):
@@ -102,20 +179,21 @@ class UnitAwareModel(BaseModel):
     only this model's mapping level; nested models receive their own input and
     reuse Pydantic's validation context.
 
-    ``UnitDimension`` metadata is translated into ``reference_units`` checks,
-    so the annotation's unit expression selects dimensions but never an output
-    scale. A suffixed key must name a field that declares a ``UnitDimension``,
-    so no value is converted without a dimensional check. Canonical input
-    without unit suffixes can be validated without a context.
+    ``UnitDimension`` metadata is projected onto its containing field, then
+    translated into ``reference_units`` checks. The annotation's unit expression
+    selects dimensions but never an output scale. A suffixed key must name a
+    field with one unambiguous projected dimension, so no value is converted
+    without a dimensional check. Canonical input without unit suffixes can be
+    validated without a context.
     """
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
         super().__pydantic_init_subclass__(**kwargs)
-        # Resolve once here so conflicting declarations fail when the class is
-        # defined rather than on whichever input first carries a suffix. The
-        # validator resolves again because model_rebuild() can still complete
-        # forward-referenced annotations.
+        # Resolve once here so conflicting or unsupported declarations fail when
+        # the class is defined rather than on whichever input first has a suffix.
+        # Resolve again during validation because model_rebuild() can complete
+        # forward-referenced annotations later.
         cls._unit_reference_units()
 
     @classmethod
