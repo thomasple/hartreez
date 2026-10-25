@@ -185,10 +185,11 @@ independently of any input. This includes `dict[str, Length]`,
 
 Nested `UnitAwareModel` types declare their own fields' dimensions, and can
 be nested in any shape, including `dict` values. A nested model must itself
-be a `UnitAwareModel` to convert its suffixed keys. A plain `BaseModel` would
-ignore them and keep its defaults, so nesting one that declares
-`UnitDimension` fields, directly or in a list, union, or `dict`, raises
-`TypeError` when the outer class is defined.
+be a `UnitAwareModel` to convert its suffixed keys. A plain `BaseModel`, a
+dataclass, or a `TypedDict` would drop them as unknown keys and keep its
+defaults. Nesting one that declares `UnitDimension` fields raises `TypeError`
+when the outer class is defined, whether it appears directly, in a list,
+union, or `dict`, or inside another plain model, dataclass, or `TypedDict`.
 
 ### Which keys are suffixed
 
@@ -239,9 +240,11 @@ except ValidationError as error:
 ```
 
 This check sees only what the validated model keeps. A plain nested
-`BaseModel` applies its own `extra` policy to a suffixed key as to any key it
-does not declare: under Pydantic's default `extra="ignore"`, the key is
-dropped and the field keeps its default, as a misspelled key would. A
+`BaseModel` without dimensions applies its own `extra` policy to a suffixed
+key as to any key it does not declare: under Pydantic's default
+`extra="ignore"`, the key is dropped and the field keeps its default, as a
+misspelled key would. Nested dataclasses and `TypedDict`s without dimensions
+likewise follow their own handling of unknown keys. A
 `UnitAwareModel` rejects such a key at its own level whatever its `extra`
 policy, so make a nested model a `UnitAwareModel` when its input may carry
 suffixes. For models that read input files, set `extra="forbid"` at every

@@ -3,12 +3,14 @@ from __future__ import annotations
 import subprocess
 import sys
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Annotated, Any, Optional
 
 import pytest
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic.alias_generators import to_camel
-from typing_extensions import TypeAliasType
+from pydantic.dataclasses import dataclass as pydantic_dataclass
+from typing_extensions import TypeAliasType, TypedDict
 
 from hartreez import UnitDimension, UnitSystem, au, parse_unit
 from hartreez.pydantic import UnitAwareModel
@@ -375,16 +377,63 @@ def test_plain_models_without_dimensions_can_be_nested() -> None:
     assert model.settings.label == "md"
 
 
+@dataclass
+class DataclassParticle:
+    mass: Annotated[float, UnitDimension("Da")] = 1.0
+
+
+@pydantic_dataclass
+class PydanticDataclassParticle:
+    mass: Annotated[float, UnitDimension("Da")] = 1.0
+
+
+class TypedDictParticle(TypedDict, total=False):
+    mass: Annotated[float, UnitDimension("Da")]
+
+
+class PlainHolder(BaseModel):
+    particle: PlainParticle = PlainParticle()
+
+
+@dataclass
+class DataclassHolder:
+    particles: list[PlainParticle]
+
+
+class PlainTree(BaseModel):
+    label: str = ""
+    children: list[PlainTree] = []
+
+
 @pytest.mark.parametrize(
-    "annotation",
-    [PlainParticle, list[PlainParticle], PlainParticle | None, dict[str, PlainParticle]],
+    ("annotation", "offender"),
+    [
+        (PlainParticle, "PlainParticle"),
+        (list[PlainParticle], "PlainParticle"),
+        (PlainParticle | None, "PlainParticle"),
+        (dict[str, PlainParticle], "PlainParticle"),
+        (DataclassParticle, "DataclassParticle"),
+        (PydanticDataclassParticle, "PydanticDataclassParticle"),
+        (TypedDictParticle, "TypedDictParticle"),
+        (PlainHolder, "PlainParticle"),
+        (DataclassHolder, "PlainParticle"),
+    ],
 )
-def test_plain_models_declaring_dimensions_are_rejected_when_nested(
-    annotation: object,
+def test_plain_types_declaring_dimensions_are_rejected_when_nested(
+    annotation: object, offender: str
 ) -> None:
-    # A plain BaseModel would ignore its suffixed keys, leaving defaults behind.
-    with pytest.raises(TypeError, match="PlainParticle.*UnitAwareModel"):
+    # A plain model, dataclass or TypedDict would drop its suffixed keys as
+    # unknown keys, leaving defaults behind, at any nesting depth.
+    with pytest.raises(TypeError, match=f"{offender}.*UnitAwareModel"):
         type("Outer", (UnitAwareModel,), {"__annotations__": {"particle": annotation}})
+
+
+def test_recursive_plain_models_without_dimensions_can_be_nested() -> None:
+    class WithTree(UnitAwareModel):
+        tree: PlainTree
+
+    model = WithTree.model_validate({"tree": {"children": [{"label": "leaf"}]}})
+    assert model.tree.children[0].label == "leaf"
 
 
 def test_input_keys_shared_with_undimensioned_fields_are_rejected() -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import types
 import typing
 from collections import deque
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from typing import Annotated, Any, Union, cast, get_args, get_origin
 
@@ -157,20 +157,64 @@ def _project_dimension(name: str, annotation: Any) -> UnitDimension | None:
     return None
 
 
-def _nested_plain_models(annotation: Any) -> Iterator[type[BaseModel]]:
+def _plain_schema_fields(annotation: Any) -> list[tuple[list[Any], Any]] | None:
+    """Return the field metadata and annotations of a plain schema type.
+
+    Plain schema types are BaseModels other than UnitAwareModel, dataclasses
+    and TypedDicts. Any other annotation returns None.
+    """
+
+    if not isinstance(annotation, type):
+        return None
+    schema = cast(type[Any], annotation)
+    if issubclass(schema, UnitAwareModel):
+        return None
+    if issubclass(schema, BaseModel):
+        # Pydantic lifts top-level Annotated metadata out of the annotation.
+        return [(field.metadata, field.annotation) for field in schema.model_fields.values()]
+    if is_dataclass(schema) or typing_extensions.is_typeddict(schema):
+        try:
+            hints = typing.get_type_hints(schema, include_extras=True)
+        except NameError:
+            # A forward reference that is not defined yet; the model resolves
+            # its fields again when it validates.
+            return []
+        return [([], hint) for hint in hints.values()]
+    return None
+
+
+def _plain_type_with_dimensions(annotation: Any, seen: set[int]) -> type | None:
+    """Return a plain schema type nested in ``annotation`` that declares dimensions.
+
+    Plain models, dataclasses and TypedDicts drop suffixed keys as unknown
+    keys, so one that declares UnitDimension would silently keep its
+    defaults, at any depth below a UnitAwareModel.
+    """
+
     if _is_type_alias(annotation):
-        yield from _nested_plain_models(annotation.__value__)
-        return
+        return _plain_type_with_dimensions(annotation.__value__, seen)
     # Check generic aliases first: on Python 3.10, list[int] passes isinstance(type).
     if get_origin(annotation) is not None:
         for argument in _type_arguments(annotation):
-            yield from _nested_plain_models(argument)
-    elif (
-        isinstance(annotation, type)
-        and issubclass(annotation, BaseModel)
-        and not issubclass(annotation, UnitAwareModel)
-    ):
-        yield annotation
+            found = _plain_type_with_dimensions(argument, seen)
+            if found is not None:
+                return found
+        return None
+    schema_fields = _plain_schema_fields(annotation)
+    # ``seen`` stops recursive models such as ``children: list[Tree]``.
+    if schema_fields is None or id(annotation) in seen:
+        return None
+    seen.add(id(annotation))
+    for metadata, field_annotation in schema_fields:
+        if any(isinstance(item, UnitDimension) for item in metadata) or (
+            _contains_unit_dimension(field_annotation)
+        ):
+            return annotation
+    for _, field_annotation in schema_fields:
+        found = _plain_type_with_dimensions(field_annotation, seen)
+        if found is not None:
+            return found
+    return None
 
 
 def _has_unit_suffix(key: Any) -> bool:
@@ -285,18 +329,15 @@ class UnitAwareModel(BaseModel):
         )
         registered: dict[str, tuple[str, UnitDimension | None]] = {}
         for name, model_field in cls.model_fields.items():
-            # Only UnitAwareModel converts its own level; a plain model would
-            # ignore its suffixed keys and silently keep its defaults.
-            for nested in _nested_plain_models(model_field.annotation):
-                if any(
-                    _field_dimension(nested_name, nested_field) is not None
-                    for nested_name, nested_field in nested.model_fields.items()
-                ):
-                    raise TypeError(
-                        f"field {name!r} nests {nested.__name__}, which declares "
-                        f"UnitDimension fields but is not a UnitAwareModel; derive "
-                        f"{nested.__name__} from UnitAwareModel"
-                    )
+            # Only UnitAwareModel converts its own level; a plain schema type
+            # would ignore its suffixed keys and silently keep its defaults.
+            nested = _plain_type_with_dimensions(model_field.annotation, set())
+            if nested is not None:
+                raise TypeError(
+                    f"field {name!r} nests {nested.__name__}, which declares "
+                    f"UnitDimension fields but is not a UnitAwareModel; make "
+                    f"{nested.__name__} a UnitAwareModel"
+                )
             # Fields without a dimension are registered too, so a key they share
             # with a dimensioned field cannot hand them a converted value.
             dimension = _field_dimension(name, model_field)
