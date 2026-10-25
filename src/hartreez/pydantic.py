@@ -30,6 +30,8 @@ def _pointer_token(value: str) -> str:
 _UNION_ORIGINS: tuple[Any, ...] = (Union, types.UnionType)
 _SEQUENCE_ORIGINS: tuple[Any, ...] = (list, set, frozenset, Sequence)
 _NONE_TYPE = type(None)
+# Runtime containers searched for suffixed keys left after validation.
+_SCANNED_CONTAINERS: tuple[type, ...] = (list, tuple, set, frozenset, deque)
 
 
 # ``type Alias = ...`` creates typing.TypeAliasType on Python 3.12+, which
@@ -47,8 +49,9 @@ def _is_type_alias(annotation: Any) -> bool:
     return isinstance(annotation, _TYPE_ALIAS_TYPES) and get_origin(annotation) is None
 
 
-def _alias_arguments(annotation: Any) -> tuple[Any, ...]:
-    # The arguments of an annotation, plus the body of a generic type alias.
+def _type_arguments(annotation: Any) -> tuple[Any, ...]:
+    """Return an annotation's arguments, plus the body of a generic type alias."""
+
     arguments = get_args(annotation)
     origin = get_origin(annotation)
     if isinstance(origin, _TYPE_ALIAS_TYPES):
@@ -72,7 +75,7 @@ def _contains_unit_dimension(annotation: Any) -> bool:
         return any(isinstance(item, UnitDimension) for item in metadata) or (
             _contains_unit_dimension(inner)
         )
-    return any(_contains_unit_dimension(argument) for argument in _alias_arguments(annotation))
+    return any(_contains_unit_dimension(argument) for argument in _type_arguments(annotation))
 
 
 def _merge_dimensions(
@@ -160,7 +163,7 @@ def _nested_plain_models(annotation: Any) -> Iterator[type[BaseModel]]:
         return
     # Check generic aliases first: on Python 3.10, list[int] passes isinstance(type).
     if get_origin(annotation) is not None:
-        for argument in _alias_arguments(annotation):
+        for argument in _type_arguments(annotation):
             yield from _nested_plain_models(argument)
     elif (
         isinstance(annotation, type)
@@ -171,23 +174,36 @@ def _nested_plain_models(annotation: Any) -> Iterator[type[BaseModel]]:
 
 
 def _has_unit_suffix(key: Any) -> bool:
+    """Whether ``key`` is a string the mapping layer would read as annotated."""
+
     # Like the mapping layer, treat any bracket as an attempted annotation so a
     # malformed suffix is reported rather than kept as part of the key.
     return isinstance(key, str) and ("[" in key or "]" in key)
 
 
-_SEQUENCE_TYPES = (list, tuple, set, frozenset, deque)
+def _model_items(model: BaseModel) -> dict[str, Any]:
+    """Return a model's field values together with its extra values."""
+
+    return {**model.__dict__, **(model.__pydantic_extra__ or {})}
 
 
 def _find_suffixed_key(value: Any) -> tuple[list[str], str] | None:
-    # Returns the path segments to the first suffixed key, built only on the
-    # way back so large numeric lists cost one isinstance check per element.
+    """Return the path segments to the first suffixed key below ``value``.
+
+    Segments are built only on the way back, so a large numeric list costs one
+    isinstance check per element.
+    """
+
     children: Iterable[tuple[Any, Any]]
     # A UnitAwareModel has already converted or rejected its own keys.
     if isinstance(value, UnitAwareModel):
         return None
     if isinstance(value, BaseModel):
-        children = {**value.__dict__, **(value.__pydantic_extra__ or {})}.items()
+        # Extra values of a plain model keep their input keys as names.
+        for name in value.__pydantic_extra__ or {}:
+            if _has_unit_suffix(name):
+                return [], name
+        children = _model_items(value).items()
     elif is_dataclass(value) and not isinstance(value, type):
         children = ((item.name, getattr(value, item.name)) for item in fields(value))
     elif isinstance(value, Mapping):
@@ -196,8 +212,9 @@ def _find_suffixed_key(value: Any) -> tuple[list[str], str] | None:
             if _has_unit_suffix(key):
                 return [], key
         children = ((f"[{key!r}]", item) for key, item in mapping.items())
-    elif isinstance(value, _SEQUENCE_TYPES):
-        children = ((f"[{index}]", item) for index, item in enumerate(cast(Iterable[Any], value)))
+    elif isinstance(value, _SCANNED_CONTAINERS):
+        items = cast(Iterable[Any], value)
+        children = ((f"[{index}]", item) for index, item in enumerate(items))
     else:
         return None
     for segment, child in children:
@@ -371,7 +388,7 @@ class UnitAwareModel(BaseModel):
         # a dict field, an extra value or a plain nested model would keep its
         # suffix and leave its value unconverted.
         # The model itself is the root: its own keys were converted before.
-        for name, value in {**self.__dict__, **(self.__pydantic_extra__ or {})}.items():
+        for name, value in _model_items(self).items():
             found = _find_suffixed_key(value)
             if found is not None:
                 segments, key = found

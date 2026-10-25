@@ -27,7 +27,8 @@ config = SimulationInput.model_validate(
 
 `config.timestep` and `config.force` contain values converted into `au` before
 Pydantic checks their field types, constraints, and application validators.
-For example, a positive-value constraint sees the converted internal value.
+For example, a positive-value constraint sees the value converted into the
+working system.
 The model validator removes annotated key suffixes at the current model level
 only; nested models validate their own mappings and inherit Pydantic's context.
 A `model_validator(mode="before")` that you define on a `UnitAwareModel` runs

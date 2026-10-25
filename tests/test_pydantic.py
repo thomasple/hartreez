@@ -572,6 +572,8 @@ def test_nested_conversion_errors_include_model_and_list_locations(
 
 
 class TaggedSettings(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     tags: dict[str, float] = {}
 
 
@@ -590,6 +592,7 @@ class ContainerInput(UnitAwareModel):
         ({"masses": {"H[Da]": 1.0}}, r"\$\.masses"),
         ({"tables": [{}, {"H[Da]": 1.0}]}, r"\$\.tables\[1\]"),
         ({"settings": {"tags": {"H[Da]": 1.0}}}, r"\$\.settings\.tags"),
+        ({"settings": {"H[Da]": 1.0}}, r"\$\.settings"),
         ({"extra": {"H[Da]": 1.0}}, r"\$\.extra"),
     ],
 )
