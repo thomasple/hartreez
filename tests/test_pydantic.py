@@ -4,7 +4,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Annotated, Any, Generic, Optional, TypeVar, Union
+from typing import Annotated, Any, Generic, Optional, TypeVar, Union, cast
 
 import pytest
 from pydantic import (
@@ -830,17 +830,85 @@ def test_validators_may_copy_nested_input(
     model.model_validate(payload, context={"unit_system": au})
 
 
-def test_validators_that_change_nested_input_are_rejected() -> None:
-    class Changing(UnitAwareModel):
-        particle: ParticleInput
+class NamedParticle(UnitAwareModel):
+    name: str = ""
+    mass: Annotated[float, UnitDimension("Da")] = 1.0
+
+
+class Species(UnitAwareModel):
+    particles: list[NamedParticle]
+
+    @field_validator("particles", mode="before")
+    @classmethod
+    def from_mapping(cls, value: Any) -> Any:
+        # Shorthand: species keyed by name.
+        if isinstance(value, dict):
+            entries = cast(dict[str, dict[str, Any]], value)
+            return [{"name": name, **entry} for name, entry in entries.items()]
+        return value
+
+
+class WithDefaults(UnitAwareModel):
+    particles: list[NamedParticle]
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_defaults(cls, data: Any) -> Any:
+        defaults = data.pop("defaults", {})
+        return {**data, "particles": [{**defaults, **p} for p in data["particles"]]}
+
+
+class Commented(UnitAwareModel):
+    particle: NamedParticle
+
+    @field_validator("particle", mode="before")
+    @classmethod
+    def drop_comments(cls, value: Any) -> Any:
+        return {k: v for k, v in value.items() if not k.startswith("_")}
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (Species, {"particles": {"H": {"mass[Da]": 1.0}, "O": {"mass[Da]": 16.0}}}),
+        (WithDefaults, {"defaults": {"name": "X"}, "particles": [{"mass[Da]": 1.0}]}),
+        (Commented, {"particle": {"_comment": "hydrogen", "mass[Da]": 1.0}}),
+    ],
+)
+def test_validators_may_add_or_remove_unsuffixed_keys_of_nested_input(
+    model: type[UnitAwareModel], payload: dict[str, object]
+) -> None:
+    # A changed copy is still matched while every suffixed entry of its
+    # input is unchanged.
+    model.model_validate(payload, context={"unit_system": au})
+
+
+def test_validators_that_rename_suffixed_keys_of_nested_input_are_rejected() -> None:
+    class Migrating(UnitAwareModel):
+        particle: NamedParticle
 
         @field_validator("particle", mode="before")
         @classmethod
-        def add_momentum(cls, value: Any) -> Any:
-            return {**value, "momentum": 0.0}
+        def rename_legacy_keys(cls, value: Any) -> Any:
+            return {("mass[Da]" if k == "m[Da]" else k): v for k, v in value.items()}
 
-    with pytest.raises(ValidationError, match=r"'mass\[Da\]' at \$\.particle"):
-        Changing.model_validate({"particle": {"mass[Da]": 1.0}}, context={"unit_system": au})
+    with pytest.raises(ValidationError, match=r"'m\[Da\]' at \$\.particle"):
+        Migrating.model_validate({"particle": {"m[Da]": 1.0}}, context={"unit_system": au})
+
+
+def test_suffixed_defaults_merged_by_a_validator_convert() -> None:
+    model = WithDefaults.model_validate(
+        {"defaults": {"mass[Da]": 1.0}, "particles": [{"name": "H"}, {"name": "D"}]},
+        context={"unit_system": au},
+    )
+    assert [p.mass for p in model.particles] == pytest.approx([au.factor_from("Da")] * 2)
+
+
+def test_suffixed_defaults_that_no_nested_model_receives_are_rejected() -> None:
+    with pytest.raises(ValidationError, match=r"'mass\[Da\]' at \$\.defaults"):
+        WithDefaults.model_validate(
+            {"defaults": {"mass[Da]": 1.0}, "particles": []}, context={"unit_system": au}
+        )
 
 
 def test_a_copy_converts_only_one_of_two_equal_inputs() -> None:
@@ -858,3 +926,19 @@ def test_a_copy_converts_only_one_of_two_equal_inputs() -> None:
         Pair.model_validate(
             {"particle": dict(same), "dropped": dict(same)}, context={"unit_system": au}
         )
+
+
+def test_a_nested_models_own_validator_may_rename_suffixed_keys() -> None:
+    class LegacyParticle(UnitAwareModel):
+        mass: Annotated[float, UnitDimension("Da")] = 1.0
+
+        @model_validator(mode="before")
+        @classmethod
+        def rename_legacy_keys(cls, data: Any) -> Any:
+            return {("mass[Da]" if k == "m[Da]" else k): v for k, v in data.items()}
+
+    class Holder(UnitAwareModel):
+        particle: LegacyParticle
+
+    model = Holder.model_validate({"particle": {"m[Da]": 1.0}}, context={"unit_system": au})
+    assert model.particle.mass == pytest.approx(au.factor_from("Da"))

@@ -249,14 +249,51 @@ except ValidationError as error:
 ```
 
 A nested `UnitAwareModel` is matched to the input mapping it was built
-from: the same object, which Pydantic passes on from the input, or else an
-equal copy of it. A validator that runs before it, such as a
-`model_validator(mode="before")` on an enclosing model or a
-`field_validator(mode="before")` on the field, may therefore copy nested
-input, for example with `dict(value)` or `copy.deepcopy(data)`. It must not
-change a nested mapping that holds suffixed keys, for example by adding a
-default key: the changed mapping matches no input, so its converted keys
-look unconverted and validation fails.
+from: the same object, which Pydantic passes on from the input, or else a
+copy holding every suffixed entry of that mapping unchanged. A validator that
+runs before it, such as a `model_validator(mode="before")` on an enclosing
+model or a `field_validator(mode="before")` on the field, may therefore copy
+nested input, add or remove unsuffixed keys, or merge in entries from
+another part of the input, such as shared defaults:
+
+```python
+from typing import Annotated, Any
+
+from pydantic import field_validator
+
+from hartreez import UnitDimension, au
+from hartreez.pydantic import UnitAwareModel
+
+
+class Species(UnitAwareModel):
+    name: str
+    mass: Annotated[float, UnitDimension("Da")]
+
+
+class Composition(UnitAwareModel):
+    species: list[Species]
+
+    @field_validator("species", mode="before")
+    @classmethod
+    def from_mapping(cls, value: Any) -> Any:
+        # Accept species keyed by name.
+        if isinstance(value, dict):
+            return [{"name": name, **entry} for name, entry in value.items()]
+        return value
+
+
+water = Composition.model_validate(
+    {"species": {"H": {"mass[Da]": 1.008}, "O": {"mass[Da]": 15.999}}},
+    context={"unit_system": au},
+)
+```
+
+A validator must not rename a suffixed key or change its value, for example
+to migrate a legacy key such as `m[Da]` to `mass[Da]`: the result matches no
+input mapping, so validation fails. Do such changes in the nested model's own
+`model_validator(mode="before")`, which receives its input after the match.
+Suffixed entries that end up in no `UnitAwareModel`, such as defaults that no
+nested model receives, are reported like any other unconverted key.
 
 For models that read input files, set `extra="forbid"` at every level as
 well, so misspelled keys are rejected like stray suffixed ones.
