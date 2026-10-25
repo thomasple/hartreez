@@ -7,6 +7,8 @@ the minor version.
 
 ## Unreleased
 
+## 0.2.0 - 2026-10-25
+
 ### Removed
 
 - **Breaking:** the Pydantic integration: the `hartreez[pydantic]` extra,
