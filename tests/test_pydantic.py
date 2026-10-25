@@ -4,10 +4,20 @@ import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Annotated, Any, Generic, Optional, TypeVar
+from typing import Annotated, Any, Generic, Optional, TypeVar, Union
 
 import pytest
-from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainValidator,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 from typing_extensions import TypeAliasType, TypedDict
@@ -728,3 +738,74 @@ def test_cyclic_values_without_suffixes_are_accepted() -> None:
 
     model = AnyPayloadInput.model_validate({"payload": cycle})
     assert model.payload is cycle
+
+
+class PlainMass(BaseModel):
+    mass: float = 1.0
+
+
+def _outer(annotation: object, **namespace: object) -> type[UnitAwareModel]:
+    return type(
+        "Outer", (UnitAwareModel,), {"__annotations__": {"value": annotation}, **namespace}
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "payload", "location"),
+    [
+        # Plain nested types without dimensions drop unknown keys by default.
+        (_outer(PlainMass), {"value": {"mass[Da]": 12.0}}, r"\$\.value"),
+        (_outer(Any), {"value": {"mass[Da]": 12.0}}, r"\$\.value"),
+        # A path alias reads below the model's own level.
+        (
+            _outer(float, value=Field(0.0, validation_alias=AliasPath("w", "v"))),
+            {"w": {"v[Da]": 12.0}},
+            r"\$\.w",
+        ),
+        # The compiled schema cannot see a model validated by custom code.
+        (
+            _outer(Annotated[Any, PlainValidator(PlainParticle.model_validate)]),
+            {"value": {"mass[Da]": 12.0}},
+            r"\$\.value",
+        ),
+        # Pydantic prefers the dict member, which keeps the suffixed key.
+        (
+            _outer(Union[ParticleInput, dict[str, float]]),
+            {"value": {"mass[Da]": 12.0}},
+            r"\$\.value",
+        ),
+    ],
+)
+def test_suffixed_keys_not_converted_by_a_unit_aware_model_are_rejected(
+    model: type[UnitAwareModel], payload: dict[str, object], location: str
+) -> None:
+    with pytest.raises(ValidationError, match=rf"'\w+\[Da\]' at {location} has a unit suffix"):
+        model.model_validate(payload, context={"unit_system": au})
+
+
+def test_a_dict_object_shared_by_two_nested_models_converts_in_both() -> None:
+    class Particles(UnitAwareModel):
+        particles: list[ParticleInput]
+
+    shared = {"mass[Da]": 1.0, "momentum": 0.0}
+    model = Particles.model_validate(
+        {"particles": [shared, shared]}, context={"unit_system": au}
+    )
+    assert [p.mass for p in model.particles] == pytest.approx([au.factor_from("Da")] * 2)
+
+
+def test_validators_that_copy_nested_input_are_rejected() -> None:
+    # Nested models are matched to their input by object identity, so a
+    # validator must return nested input mappings unchanged.
+    class Copying(UnitAwareModel):
+        particle: ParticleInput
+
+        @model_validator(mode="before")
+        @classmethod
+        def copy_particle(cls, data: Any) -> Any:
+            return {**data, "particle": dict(data["particle"])}
+
+    with pytest.raises(ValidationError, match=r"'mass\[Da\]' at \$\.particle"):
+        Copying.model_validate(
+            {"particle": {"mass[Da]": 1.0, "momentum": 0.0}}, context={"unit_system": au}
+        )

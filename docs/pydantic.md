@@ -193,6 +193,11 @@ union, or `dict`, or inside another plain model, dataclass, or `TypedDict`.
 A generic one counts when its own fields declare a dimension, as in
 `Box[int]`, or when a type argument does, as in `Box[Length]`.
 
+This early check reads the schema Pydantic compiles for the model, so it
+cannot see into custom validation code, such as a `PlainValidator`, and it
+waits for models with unresolved forward references. Suffixed input those
+reach is still rejected when it is validated, as described below.
+
 ### Which keys are suffixed
 
 Suffixed keys follow Pydantic's own rules for which input keys fill a field:
@@ -218,11 +223,13 @@ such as `count[ps]` on an integer field or an unknown key, raises a
 it. A value is never converted without its dimension being checked.
 Unsuffixed keys are left to normal Pydantic validation.
 
-Only a `UnitAwareModel` converts its keys. A key containing `[` or `]`
-anywhere else in the validated model, such as a key of a `dict` field, of an
-extra value, or of a plain nested `BaseModel`'s field, would keep its suffix
-and leave its value unconverted, so validation fails with a message naming
-its path:
+Only a `UnitAwareModel` converts its keys, so every suffixed key in the
+input must be converted by a `UnitAwareModel` that ends up in the validated
+result. Otherwise validation fails with a message naming the key's path.
+This covers a key that would stay in a `dict` field, an `Any` field, or an
+extra value with its value unconverted, and a key that a plain model,
+dataclass, or `TypedDict` would drop as unknown, leaving its default behind,
+whatever their `extra` policy:
 
 ```python
 from pydantic import ValidationError
@@ -241,13 +248,13 @@ except ValidationError as error:
     assert "'H[Da]' at $.masses" in str(error)
 ```
 
-This check sees only what the validated model keeps. A plain nested
-`BaseModel` without dimensions applies its own `extra` policy to a suffixed
-key as to any key it does not declare: under Pydantic's default
-`extra="ignore"`, the key is dropped and the field keeps its default, as a
-misspelled key would. Nested dataclasses and `TypedDict`s without dimensions
-likewise follow their own handling of unknown keys. A
-`UnitAwareModel` rejects such a key at its own level whatever its `extra`
-policy, so make a nested model a `UnitAwareModel` when its input may carry
-suffixes. For models that read input files, set `extra="forbid"` at every
-level to reject misspelled and stray suffixed keys alike.
+A nested `UnitAwareModel` is matched to its input by object identity:
+Pydantic passes it the mapping object from the input. A validator that runs
+before it, such as a `model_validator(mode="before")` on an enclosing model or
+a `field_validator(mode="before")` on the field, must return nested input
+mappings unchanged. A validator that copies one, for example with
+`dict(value)`, makes the converted keys look unconverted, so validation
+fails.
+
+For models that read input files, set `extra="forbid"` at every level as
+well, so misspelled keys are rejected like stray suffixed ones.
