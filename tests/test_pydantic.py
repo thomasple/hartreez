@@ -4,7 +4,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Generic, Optional, TypeVar
 
 import pytest
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -400,6 +400,29 @@ class DataclassHolder:
     particles: list[PlainParticle]
 
 
+Item = TypeVar("Item")
+
+
+@dataclass
+class DataclassBox(Generic[Item]):
+    item: Item
+    mass: Annotated[float, UnitDimension("Da")] = 1.0
+
+
+@dataclass
+class DataclassSlot(Generic[Item]):
+    item: Item
+
+
+class TypedDictBox(TypedDict, Generic[Item], total=False):
+    item: Item
+    mass: Annotated[float, UnitDimension("Da")]
+
+
+class TypedDictSlot(TypedDict, Generic[Item]):
+    item: Item
+
+
 class PlainTree(BaseModel):
     label: str = ""
     children: list[PlainTree] = []
@@ -417,6 +440,10 @@ class PlainTree(BaseModel):
         (TypedDictParticle, "TypedDictParticle"),
         (PlainHolder, "PlainParticle"),
         (DataclassHolder, "PlainParticle"),
+        (DataclassBox[int], "DataclassBox"),
+        (DataclassSlot[Length], "DataclassSlot"),
+        (TypedDictBox[int], "TypedDictBox"),
+        (TypedDictSlot[Length], "TypedDictSlot"),
     ],
 )
 def test_plain_types_declaring_dimensions_are_rejected_when_nested(
@@ -426,6 +453,15 @@ def test_plain_types_declaring_dimensions_are_rejected_when_nested(
     # unknown keys, leaving defaults behind, at any nesting depth.
     with pytest.raises(TypeError, match=f"{offender}.*UnitAwareModel"):
         type("Outer", (UnitAwareModel,), {"__annotations__": {"particle": annotation}})
+
+
+def test_generic_plain_types_without_dimensions_can_be_nested() -> None:
+    class WithSlots(UnitAwareModel):
+        slot: DataclassSlot[int]
+        entry: TypedDictSlot[str]
+
+    model = WithSlots.model_validate({"slot": {"item": 1}, "entry": {"item": "a"}})
+    assert model.slot.item == 1
 
 
 def test_recursive_plain_models_without_dimensions_can_be_nested() -> None:

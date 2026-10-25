@@ -190,6 +190,8 @@ dataclass, or a `TypedDict` would drop them as unknown keys and keep its
 defaults. Nesting one that declares `UnitDimension` fields raises `TypeError`
 when the outer class is defined, whether it appears directly, in a list,
 union, or `dict`, or inside another plain model, dataclass, or `TypedDict`.
+A generic one counts when its own fields declare a dimension, as in
+`Box[int]`, or when a type argument does, as in `Box[Length]`.
 
 ### Which keys are suffixed
 

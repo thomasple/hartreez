@@ -194,7 +194,17 @@ def _plain_type_with_dimensions(annotation: Any, seen: set[int]) -> type | None:
     if _is_type_alias(annotation):
         return _plain_type_with_dimensions(annotation.__value__, seen)
     # Check generic aliases first: on Python 3.10, list[int] passes isinstance(type).
-    if get_origin(annotation) is not None:
+    origin = get_origin(annotation)
+    if origin is not None:
+        # A parametrized plain schema such as ``Box[int]`` has its origin's
+        # fields, and a dimension passed as an argument, as in ``Box[Length]``,
+        # becomes the type of one of them.
+        if _plain_schema_fields(origin) is not None:
+            if any(_contains_unit_dimension(argument) for argument in get_args(annotation)):
+                return origin
+            found = _plain_type_with_dimensions(origin, seen)
+            if found is not None:
+                return found
         for argument in _type_arguments(annotation):
             found = _plain_type_with_dimensions(argument, seen)
             if found is not None:
