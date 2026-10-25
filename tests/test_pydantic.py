@@ -571,6 +571,45 @@ def test_nested_conversion_errors_include_model_and_list_locations(
     assert message in list_error["msg"]
 
 
+class TaggedSettings(BaseModel):
+    tags: dict[str, float] = {}
+
+
+class ContainerInput(UnitAwareModel):
+    model_config = ConfigDict(extra="allow")
+
+    masses: dict[str, float] = {}
+    tables: list[dict[str, float]] = []
+    settings: TaggedSettings = TaggedSettings()
+    particles: dict[str, ParticleInput] = {}
+
+
+@pytest.mark.parametrize(
+    ("payload", "location"),
+    [
+        ({"masses": {"H[Da]": 1.0}}, r"\$\.masses"),
+        ({"tables": [{}, {"H[Da]": 1.0}]}, r"\$\.tables\[1\]"),
+        ({"settings": {"tags": {"H[Da]": 1.0}}}, r"\$\.settings\.tags"),
+        ({"extra": {"H[Da]": 1.0}}, r"\$\.extra"),
+    ],
+)
+def test_suffixed_keys_outside_unit_aware_models_are_rejected(
+    payload: dict[str, object], location: str
+) -> None:
+    # Only a UnitAwareModel converts its keys; elsewhere the suffix would stay
+    # part of the key and its value would never be converted.
+    with pytest.raises(ValidationError, match=rf"'H\[Da\]' at {location}"):
+        ContainerInput.model_validate(payload, context={"unit_system": au})
+
+
+def test_suffixed_keys_inside_nested_unit_aware_models_still_convert() -> None:
+    model = ContainerInput.model_validate(
+        {"particles": {"a": {"mass[Da]": 1.0, "momentum": 0.0}}},
+        context={"unit_system": au},
+    )
+    assert model.particles["a"].mass == pytest.approx(au.factor_from("Da"))
+
+
 def test_core_namespace_does_not_import_or_require_pydantic() -> None:
     script = """
 import importlib.abc

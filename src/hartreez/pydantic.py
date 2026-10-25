@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import types
 import typing
-from collections.abc import Iterator, Mapping, Sequence
+from collections import deque
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import fields, is_dataclass
 from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 import typing_extensions
@@ -168,6 +170,47 @@ def _nested_plain_models(annotation: Any) -> Iterator[type[BaseModel]]:
         yield annotation
 
 
+def _has_unit_suffix(key: Any) -> bool:
+    # Like the mapping layer, treat any bracket as an attempted annotation so a
+    # malformed suffix is reported rather than kept as part of the key.
+    return isinstance(key, str) and ("[" in key or "]" in key)
+
+
+_SEQUENCE_TYPES = (list, tuple, set, frozenset, deque)
+
+
+def _find_suffixed_key(value: Any) -> tuple[list[str], str] | None:
+    # Returns the path segments to the first suffixed key, built only on the
+    # way back so large numeric lists cost one isinstance check per element.
+    children: Iterable[tuple[Any, Any]]
+    # A UnitAwareModel has already converted or rejected its own keys.
+    if isinstance(value, UnitAwareModel):
+        return None
+    if isinstance(value, BaseModel):
+        children = {**value.__dict__, **(value.__pydantic_extra__ or {})}.items()
+    elif is_dataclass(value) and not isinstance(value, type):
+        children = ((item.name, getattr(value, item.name)) for item in fields(value))
+    elif isinstance(value, Mapping):
+        mapping = cast(Mapping[Any, Any], value)
+        for key in mapping:
+            if _has_unit_suffix(key):
+                return [], key
+        children = ((f"[{key!r}]", item) for key, item in mapping.items())
+    elif isinstance(value, _SEQUENCE_TYPES):
+        children = ((f"[{index}]", item) for index, item in enumerate(cast(Iterable[Any], value)))
+    else:
+        return None
+    for segment, child in children:
+        if isinstance(child, (float, int, str)):
+            continue
+        found = _find_suffixed_key(child)
+        if found is not None:
+            segments, key = found
+            name = segment if segment.startswith("[") else f".{segment}"
+            return [name, *segments], key
+    return None
+
+
 def _describe(dimension: UnitDimension | None) -> str:
     return "none" if dimension is None else repr(dimension.expression)
 
@@ -291,10 +334,7 @@ class UnitAwareModel(BaseModel):
         # dimensional checks, and conversion. Do not recurse: nested models
         # need to process their own mapping level.
         raw_mapping = cast(Mapping[Any, Any], data)
-        contains_annotation = any(
-            isinstance(key, str) and ("[" in key or "]" in key) for key in raw_mapping
-        )
-        if not contains_annotation:
+        if not any(_has_unit_suffix(key) for key in raw_mapping):
             return raw_mapping
 
         context: Any = info.context
@@ -324,6 +364,23 @@ class UnitAwareModel(BaseModel):
             # A ValueError from a before validator is represented as a normal
             # Pydantic ValidationError at the model's input location.
             raise ValueError(str(exc)) from exc
+
+    @model_validator(mode="after")
+    def _reject_unconverted_suffixes(self) -> UnitAwareModel:
+        # Only a UnitAwareModel converts its keys. A suffixed key that reached
+        # a dict field, an extra value or a plain nested model would keep its
+        # suffix and leave its value unconverted.
+        # The model itself is the root: its own keys were converted before.
+        for name, value in {**self.__dict__, **(self.__pydantic_extra__ or {})}.items():
+            found = _find_suffixed_key(value)
+            if found is not None:
+                segments, key = found
+                path = "".join(["$.", name, *segments])
+                raise ValueError(
+                    f"key {key!r} at {path} has a unit suffix, but only the keys "
+                    "of a UnitAwareModel are converted"
+                )
+        return self
 
 
 __all__ = ["UnitAwareModel"]
