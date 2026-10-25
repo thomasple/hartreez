@@ -294,7 +294,11 @@ water = Composition.model_validate(
 A validator must not rename a suffixed key, for example to migrate a legacy
 key such as `m[Da]` to `mass[Da]`, or change a suffixed value, even only its
 type, such as `True` to `1.0`: the result matches no input mapping, so
-validation fails. Do such changes in the nested model's own
+validation fails. A validator should also not hand one nested input mapping
+to more nested models than the input did, for example by duplicating a list
+entry. A suffixed key still held anywhere in the result is always reported,
+but a duplicate can stand in for an occurrence of the same mapping elsewhere
+in the input that a plain model dropped. Do such changes in the nested model's own
 `model_validator(mode="before")`, which receives its input after the match.
 Suffixed entries that end up in no `UnitAwareModel`, such as defaults that no
 nested model receives, are reported like any other unconverted key.

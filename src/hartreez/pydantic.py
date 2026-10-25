@@ -298,17 +298,34 @@ class _SuffixLedger:
             self.keep.append(data)
         return self.copies[data_id]
 
-    def unconverted(self, result: Any) -> tuple[_PendingMapping, int] | None:
-        """Return a pending mapping with fewer models in ``result`` than occurrences.
-
-        The count returned is how many models in the result were built from it.
-        """
+    def unconverted(self, result: UnitAwareModel) -> str | None:
+        """Describe a suffixed key of the input that ``result`` did not convert."""
 
         converted = Counter[int]()
-        _count_sources(result, self, converted, set())
+        # A suffixed key still held in the result is reported where it is,
+        # whatever the counts say: a validator may have duplicated the input
+        # of a nested model, which then covers more occurrences than it had.
+        kept = _scan_result(result, self, converted, set())
+        if kept is not None:
+            segments, key = kept
+            return (
+                f"key {key!r} at {''.join(['$', *segments])} has a unit suffix, but no "
+                "UnitAwareModel in the result converted it"
+            )
         for mapping_id, entry in self.pending.items():
-            if converted[mapping_id] < entry.occurrences:
-                return entry, converted[mapping_id]
+            count = converted[mapping_id]
+            if count >= entry.occurrences:
+                continue
+            if entry.occurrences == 1:
+                return (
+                    f"key {entry.key!r} at {entry.path} has a unit suffix, but no "
+                    "UnitAwareModel in the result converted it"
+                )
+            return (
+                f"key {entry.key!r} at {entry.path} has a unit suffix, and its mapping "
+                f"appears {entry.occurrences} times in the input, but only {count} "
+                "UnitAwareModel(s) in the result converted it"
+            )
         return None
 
     def _claim(self, entry: _PendingMapping, mapping_id: int) -> None:
@@ -362,6 +379,15 @@ def _signature(mapping: Mapping[Any, Any], keys: frozenset[str]) -> Hashable:
     return signature
 
 
+def _typed(value: Any) -> Hashable:
+    """Return a hashable value that compares equal only for the same types."""
+
+    if isinstance(value, tuple):
+        return (tuple, tuple(_typed(item) for item in cast(tuple[Any, ...], value)))
+    kind = cast(type[Any], type(cast(object, value)))
+    return (kind, value)
+
+
 def _same_value(left: Any, right: Any) -> bool:
     """Whether a suffixed value is unchanged, including its type."""
 
@@ -374,6 +400,11 @@ def _same_value(left: Any, right: Any) -> bool:
         items = cast(Sequence[Any], left)
         others = cast(Sequence[Any], right)
         return len(items) == len(others) and all(map(_same_value, items, others))
+    if isinstance(left, (set, frozenset)):
+        # Set members are hashable, so compare them together with their types.
+        members = cast(Iterable[Any], left)
+        others = cast(Iterable[Any], right)
+        return {_typed(item) for item in members} == {_typed(item) for item in others}
     try:
         return bool(left == right)
     except Exception:
@@ -384,28 +415,50 @@ def _same_value(left: Any, right: Any) -> bool:
 _LEDGER: ContextVar[_SuffixLedger | None] = ContextVar("hartreez_suffix_ledger", default=None)
 
 
-def _count_sources(value: Any, ledger: _SuffixLedger, converted: Counter[int], seen: set[int]) -> None:
-    """Count the pending mappings the UnitAwareModels in a validated value came from."""
+def _scan_result(
+    value: Any, ledger: _SuffixLedger, converted: Counter[int], seen: set[int]
+) -> tuple[list[str], str] | None:
+    """Count the models in a validated value by source, and find kept suffixes.
+
+    Returns the path segments to the first suffixed key still held outside a
+    UnitAwareModel, built only on the way back.
+    """
 
     if id(value) in seen:
-        return
+        return None
     seen.add(id(value))
-    children: Iterable[Any]
+    children: Iterable[tuple[str, Any]]
     if isinstance(value, BaseModel):
-        if isinstance(value, UnitAwareModel) and id(value) in ledger.sources:
-            converted[ledger.sources[id(value)]] += 1
-        children = _model_items(value).values()
+        if isinstance(value, UnitAwareModel):
+            if id(value) in ledger.sources:
+                converted[ledger.sources[id(value)]] += 1
+        else:
+            # Extra values of a plain model keep their input keys as names.
+            for name in value.__pydantic_extra__ or {}:
+                if _has_unit_suffix(name):
+                    return [], name
+        children = ((f".{name}", item) for name, item in _model_items(value).items())
     elif is_dataclass(value) and not isinstance(value, type):
-        children = (getattr(value, item.name) for item in fields(value))
+        children = ((f".{item.name}", getattr(value, item.name)) for item in fields(value))
     elif isinstance(value, Mapping):
-        children = cast(Mapping[Any, Any], value).values()
+        mapping = cast(Mapping[Any, Any], value)
+        for key in mapping:
+            if _has_unit_suffix(key):
+                return [], key
+        children = ((f"[{key!r}]", item) for key, item in mapping.items())
     elif isinstance(value, _SCANNED_CONTAINERS):
-        children = cast(Iterable[Any], value)
+        items = cast(Iterable[Any], value)
+        children = ((f"[{index}]", item) for index, item in enumerate(items))
     else:
-        return
-    for child in children:
-        if not isinstance(child, (float, int, str)):
-            _count_sources(child, ledger, converted, seen)
+        return None
+    for segment, child in children:
+        if isinstance(child, (float, int, str)):
+            continue
+        found = _scan_result(child, ledger, converted, seen)
+        if found is not None:
+            segments, key = found
+            return [segment, *segments], key
+    return None
 
 
 # Core schema nodes that validate a class from a mapping, keeping only the
@@ -644,19 +697,8 @@ class UnitAwareModel(BaseModel):
         if not ledger.pending:
             return instance
 
-        found = ledger.unconverted(instance)
-        if found is not None:
-            entry, converted = found
-            message = (
-                f"key {entry.key!r} at {entry.path} has a unit suffix, but no "
-                "UnitAwareModel in the result converted it"
-            )
-            if entry.occurrences > 1:
-                message = (
-                    f"key {entry.key!r} at {entry.path} has a unit suffix, and its "
-                    f"mapping appears {entry.occurrences} times in the input, but only "
-                    f"{converted} UnitAwareModel(s) in the result converted it"
-                )
+        message = ledger.unconverted(instance)
+        if message is not None:
             raise ValueError(message)
         return instance
 

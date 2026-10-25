@@ -951,19 +951,19 @@ class SharedInput(UnitAwareModel):
 
 
 @pytest.mark.parametrize(
-    ("second", "location"),
+    ("second", "message"),
     [
-        # Kept unconverted in an Any field.
-        ("raw", r"\$\.particle"),
+        # Kept unconverted in an Any field, and reported where it is kept.
+        ("raw", r"'mass\[Da\]' at \$\.raw has a unit suffix"),
         # Dropped as unknown keys by a plain model.
-        ("plain", r"\$\.particle"),
+        ("plain", r"'mass\[Da\]' at \$\.particle .*appears 2 times"),
     ],
 )
 def test_a_mapping_used_twice_must_be_converted_at_each_place(
-    second: str, location: str
+    second: str, message: str
 ) -> None:
     shared = {"mass[Da]": 1.0, "momentum": 0.0}
-    with pytest.raises(ValidationError, match=rf"'mass\[Da\]' at {location}.*appears 2 times"):
+    with pytest.raises(ValidationError, match=message):
         SharedInput.model_validate(
             {"particle": shared, second: shared}, context={"unit_system": au}
         )
@@ -1000,3 +1000,36 @@ def test_validators_that_change_a_suffixed_value_type_are_rejected() -> None:
         Retyping.model_validate(
             {"particle": {"mass[Da]": True, "momentum": 0.0}}, context={"unit_system": au}
         )
+
+
+def test_duplicated_nested_input_does_not_cover_a_kept_occurrence() -> None:
+    class Duplicating(UnitAwareModel):
+        particles: list[ParticleInput]
+        raw: Any = None
+
+        @field_validator("particles", mode="before")
+        @classmethod
+        def duplicate(cls, value: Any) -> Any:
+            return [value[0], value[0]]
+
+    shared = {"mass[Da]": 1.0, "momentum": 0.0}
+    with pytest.raises(ValidationError, match=r"'mass\[Da\]' at \$\.raw"):
+        Duplicating.model_validate(
+            {"particles": [shared], "raw": shared}, context={"unit_system": au}
+        )
+
+
+def test_validators_that_change_set_member_types_are_rejected() -> None:
+    class Flags(UnitAwareModel):
+        values: set[Annotated[float, UnitDimension("Da")]] = set()
+
+    class Holder(UnitAwareModel):
+        flags: Flags
+
+        @field_validator("flags", mode="before")
+        @classmethod
+        def to_floats(cls, value: Any) -> Any:
+            return {k: {float(x) for x in v} for k, v in value.items()}
+
+    with pytest.raises(ValidationError, match=r"'values\[Da\]' at \$\.flags"):
+        Holder.model_validate({"flags": {"values[Da]": {True}}}, context={"unit_system": au})
