@@ -117,6 +117,9 @@ data = convert_mapping(raw, au, reference_units={"timestep": "fs", "energy": "eV
 inputs = CalculationInput.model_validate(data)
 ```
 
-`reference_units` is where you declare the expected dimensions. Use JSON
-Pointer paths for nested models, for example `{"thermostat/tau": "fs"}`.
+`reference_units` declares the expected dimensions. Use JSON Pointer paths for
+nested models, for example `{"thermostat/tau": "fs"}`. Only listed paths are
+checked: a suffixed key without a reference, such as `junk[ps]`, is converted
+unchecked, and Pydantic ignores unknown keys by default. Set
+`model_config = ConfigDict(extra="forbid")` on your models to reject them.
 Unannotated input is assumed to already be in the working system.

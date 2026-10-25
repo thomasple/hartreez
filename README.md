@@ -88,7 +88,7 @@ assert inputs["time"] == 0.0005
 See [mapping conversion](https://github.com/thomasple/hartreez/blob/main/docs/mappings.md) for nested data and dimensional
 checks.
 
-## Validate inputs with Pydantic
+## Validate inputs with Pydantic or another library
 
 `hartreez` does not depend on a validation library. Convert unit-annotated
 input with `convert_mapping`, then validate the plain result with Pydantic or
