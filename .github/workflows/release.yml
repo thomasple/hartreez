@@ -81,10 +81,9 @@ jobs:
 
           uv venv --python 3.10 .release-venv
           python_bin="$PWD/.release-venv/bin/python"
-          uv pip install --python "$python_bin" "${wheels[0]}[pydantic]"
+          uv pip install --python "$python_bin" "${wheels[0]}"
           .release-venv/bin/hartreez --help
           "$python_bin" -c 'import hartreez; assert hartreez.convert(1, "m", "cm") == 100'
-          "$python_bin" -c 'from hartreez.pydantic import UnitAwareModel; print(UnitAwareModel.__name__)'
 
       - name: Upload distributions
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

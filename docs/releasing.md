@@ -22,8 +22,10 @@ inspect the TestPyPI result and then approve it.
 ## Release steps
 
 1. Merge the release workflow and packaging changes into `main`. Update the
-   project version in `pyproject.toml` when needed, then tag and push the release
-   commit. For the first release, the version and tag are `0.1.0` and `v0.1.0`.
+   project version in `pyproject.toml` when needed, rename `## Unreleased` in
+   `CHANGELOG.md` to that version, and add a new empty `## Unreleased` above it.
+   Then tag and push the release commit.
+   For the first release, the version and tag are `0.1.0` and `v0.1.0`.
 2. Start the workflow for the tag, for example:
 
    ```sh
