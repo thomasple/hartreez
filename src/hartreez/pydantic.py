@@ -9,17 +9,25 @@ from __future__ import annotations
 import types
 import typing
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import fields, is_dataclass
+from contextvars import ContextVar
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 import typing_extensions
-from pydantic import AliasChoices, AliasPath, BaseModel, ValidationInfo, model_validator
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ModelWrapValidatorHandler,
+    ValidationInfo,
+    model_validator,
+)
 from pydantic.fields import FieldInfo
 
 from hartreez.errors import MappingConversionError, ReferenceUnitsError
 from hartreez.mapping import normalize_mapping_level, parse_reference_units
-from hartreez.metadata import UnitDimension
+from hartreez.metadata import SCHEMA_METADATA_KEY, UnitDimension
 from hartreez.systems import UnitSystem
 
 
@@ -157,76 +165,6 @@ def _project_dimension(name: str, annotation: Any) -> UnitDimension | None:
     return None
 
 
-def _plain_schema_fields(annotation: Any) -> list[tuple[list[Any], Any]] | None:
-    """Return the field metadata and annotations of a plain schema type.
-
-    Plain schema types are BaseModels other than UnitAwareModel, dataclasses
-    and TypedDicts. Any other annotation returns None.
-    """
-
-    if not isinstance(annotation, type):
-        return None
-    schema = cast(type[Any], annotation)
-    if issubclass(schema, UnitAwareModel):
-        return None
-    if issubclass(schema, BaseModel):
-        # Pydantic lifts top-level Annotated metadata out of the annotation.
-        return [(field.metadata, field.annotation) for field in schema.model_fields.values()]
-    if is_dataclass(schema) or typing_extensions.is_typeddict(schema):
-        try:
-            hints = typing.get_type_hints(schema, include_extras=True)
-        except NameError:
-            # A forward reference that is not defined yet; the model resolves
-            # its fields again when it validates.
-            return []
-        return [([], hint) for hint in hints.values()]
-    return None
-
-
-def _plain_type_with_dimensions(annotation: Any, seen: set[int]) -> type | None:
-    """Return a plain schema type nested in ``annotation`` that declares dimensions.
-
-    Plain models, dataclasses and TypedDicts drop suffixed keys as unknown
-    keys, so one that declares UnitDimension would silently keep its
-    defaults, at any depth below a UnitAwareModel.
-    """
-
-    if _is_type_alias(annotation):
-        return _plain_type_with_dimensions(annotation.__value__, seen)
-    # Check generic aliases first: on Python 3.10, list[int] passes isinstance(type).
-    origin = get_origin(annotation)
-    if origin is not None:
-        # A parametrized plain schema such as ``Box[int]`` has its origin's
-        # fields, and a dimension passed as an argument, as in ``Box[Length]``,
-        # becomes the type of one of them.
-        if _plain_schema_fields(origin) is not None:
-            if any(_contains_unit_dimension(argument) for argument in get_args(annotation)):
-                return origin
-            found = _plain_type_with_dimensions(origin, seen)
-            if found is not None:
-                return found
-        for argument in _type_arguments(annotation):
-            found = _plain_type_with_dimensions(argument, seen)
-            if found is not None:
-                return found
-        return None
-    schema_fields = _plain_schema_fields(annotation)
-    # ``seen`` stops recursive models such as ``children: list[Tree]``.
-    if schema_fields is None or id(annotation) in seen:
-        return None
-    seen.add(id(annotation))
-    for metadata, field_annotation in schema_fields:
-        if any(isinstance(item, UnitDimension) for item in metadata) or (
-            _contains_unit_dimension(field_annotation)
-        ):
-            return annotation
-    for _, field_annotation in schema_fields:
-        found = _plain_type_with_dimensions(field_annotation, seen)
-        if found is not None:
-            return found
-    return None
-
-
 def _has_unit_suffix(key: Any) -> bool:
     """Whether ``key`` is a string the mapping layer would read as annotated."""
 
@@ -241,46 +179,130 @@ def _model_items(model: BaseModel) -> dict[str, Any]:
     return {**model.__dict__, **(model.__pydantic_extra__ or {})}
 
 
-def _find_suffixed_key(value: Any, seen: set[int]) -> tuple[list[str], str] | None:
-    """Return the path segments to the first suffixed key below ``value``.
+def _child_path(path: str, key: Any) -> str:
+    if isinstance(key, str) and key.isidentifier():
+        return f"{path}.{key}"
+    return f"{path}[{key!r}]"
 
-    Segments are built only on the way back, so a large numeric list costs one
-    isinstance check per element. ``seen`` holds the ids of values already
-    searched, so shared and cyclic values are visited once.
+
+@dataclass
+class _SuffixLedger:
+    """Suffixed raw mappings below one root UnitAwareModel, and who converted them.
+
+    Pydantic hands every nested model the raw mapping object from the input,
+    so object identity links a raw mapping to the model built from it.
     """
 
-    children: Iterable[tuple[Any, Any]]
-    # A UnitAwareModel has already converted or rejected its own keys.
-    if isinstance(value, UnitAwareModel) or id(value) in seen:
-        return None
-    seen.add(id(value))
-    if isinstance(value, BaseModel):
-        # Extra values of a plain model keep their input keys as names.
-        for name in value.__pydantic_extra__ or {}:
-            if _has_unit_suffix(name):
-                return [], name
-        children = _model_items(value).items()
-    elif is_dataclass(value) and not isinstance(value, type):
-        children = ((item.name, getattr(value, item.name)) for item in fields(value))
-    elif isinstance(value, Mapping):
+    # id of each raw mapping holding a suffixed key -> (path, first such key).
+    pending: dict[int, tuple[str, str]] = field(default_factory=dict[int, tuple[str, str]])
+    # id of each nested UnitAwareModel instance -> id of its raw input.
+    sources: dict[int, int] = field(default_factory=dict[int, int])
+    # Keeps recorded objects alive so their ids stay unique until the check.
+    keep: list[Any] = field(default_factory=list[Any])
+
+
+_LEDGER: ContextVar[_SuffixLedger | None] = ContextVar("hartreez_suffix_ledger", default=None)
+
+
+def _record_suffixed_mappings(value: Any, path: str, ledger: _SuffixLedger, seen: set[int]) -> None:
+    """Record every raw mapping below ``value`` that holds a suffixed key."""
+
+    value_id = id(value)
+    if value_id in seen:
+        return
+    if isinstance(value, Mapping):
+        seen.add(value_id)
         mapping = cast(Mapping[Any, Any], value)
-        for key in mapping:
-            if _has_unit_suffix(key):
-                return [], key
-        children = ((f"[{key!r}]", item) for key, item in mapping.items())
+        suffixed = next((key for key in mapping if _has_unit_suffix(key)), None)
+        if suffixed is not None:
+            ledger.pending[id(mapping)] = (path, suffixed)
+            ledger.keep.append(mapping)
+        for key, item in mapping.items():
+            if not isinstance(item, (float, int, str)):
+                _record_suffixed_mappings(item, _child_path(path, key), ledger, seen)
+    elif isinstance(value, (list, tuple)):
+        seen.add(value_id)
+        for index, item in enumerate(cast(Iterable[Any], value)):
+            if not isinstance(item, (float, int, str)):
+                _record_suffixed_mappings(item, f"{path}[{index}]", ledger, seen)
+
+
+def _collect_sources(value: Any, ledger: _SuffixLedger, owned: set[int], seen: set[int]) -> None:
+    """Collect the raw inputs of the UnitAwareModels kept in a validated value."""
+
+    if id(value) in seen:
+        return
+    seen.add(id(value))
+    children: Iterable[Any]
+    if isinstance(value, BaseModel):
+        if isinstance(value, UnitAwareModel) and id(value) in ledger.sources:
+            owned.add(ledger.sources[id(value)])
+        children = _model_items(value).values()
+    elif is_dataclass(value) and not isinstance(value, type):
+        children = (getattr(value, item.name) for item in fields(value))
+    elif isinstance(value, Mapping):
+        children = cast(Mapping[Any, Any], value).values()
     elif isinstance(value, _SCANNED_CONTAINERS):
-        items = cast(Iterable[Any], value)
-        children = ((f"[{index}]", item) for index, item in enumerate(items))
+        children = cast(Iterable[Any], value)
     else:
+        return
+    for child in children:
+        if not isinstance(child, (float, int, str)):
+            _collect_sources(child, ledger, owned, seen)
+
+
+# Core schema nodes that validate a class from a mapping, keeping only the
+# keys that class declares.
+_SCHEMA_CLASS_NODES = ("model", "dataclass", "typed-dict")
+
+
+def _schema_children(node: Mapping[str, Any]) -> Iterator[tuple[str | None, Any]]:
+    """Yield the child schemas of a core schema node, with field names."""
+
+    node_type = node.get("type")
+    for key, child in node.items():
+        if key == "fields" and node_type in ("model-fields", "typed-dict"):
+            for name, field_schema in cast(Mapping[str, Any], child).items():
+                yield name, field_schema
+        elif key == "fields" and node_type == "dataclass-args":
+            for field_schema in cast(list[Mapping[str, Any]], child):
+                yield field_schema["name"], field_schema
+        else:
+            yield None, child
+
+
+def _plain_class_with_dimension(
+    schema: Any, owner: type | None, path: list[str]
+) -> tuple[type, list[str]] | None:
+    """Find a UnitDimension mark below a plain model, dataclass or TypedDict.
+
+    Those classes drop suffixed keys as unknown keys, so a dimension declared
+    inside one would silently keep its default. Pydantic has already resolved
+    aliases, generics and forward references in the compiled schema.
+    """
+
+    if isinstance(schema, list):
+        for item in cast(list[Any], schema):
+            found = _plain_class_with_dimension(item, owner, path)
+            if found is not None:
+                return found
         return None
-    for segment, child in children:
-        if isinstance(child, (float, int, str)):
-            continue
-        found = _find_suffixed_key(child, seen)
+    if not isinstance(schema, Mapping):
+        return None
+    node = cast(Mapping[str, Any], schema)
+    # A mark on a class node annotates the field holding it, so check it with
+    # the enclosing owner before the node's own class takes over.
+    metadata = node.get("metadata")
+    if owner is not None and isinstance(metadata, Mapping) and SCHEMA_METADATA_KEY in metadata:
+        return owner, path
+    schema_class = node.get("cls")
+    if node.get("type") in _SCHEMA_CLASS_NODES and isinstance(schema_class, type):
+        # A UnitAwareModel converts the suffixes of its own fields.
+        owner = None if issubclass(schema_class, UnitAwareModel) else cast(type[Any], schema_class)
+    for name, child in _schema_children(node):
+        found = _plain_class_with_dimension(child, owner, path if name is None else [*path, name])
         if found is not None:
-            segments, key = found
-            name = segment if segment.startswith("[") else f".{segment}"
-            return [name, *segments], key
+            return found
     return None
 
 
@@ -322,8 +344,19 @@ class UnitAwareModel(BaseModel):
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
         super().__pydantic_init_subclass__(**kwargs)
-        # Resolve once here so conflicting or unsupported declarations fail when
-        # the class is defined rather than on whichever input first has a suffix.
+        # Fail when the class is defined rather than on whichever input first
+        # has a suffix. A model with unresolved forward references has no
+        # compiled schema yet; its suffixed input is still checked when it
+        # validates.
+        if cls.__pydantic_complete__:
+            found = _plain_class_with_dimension(cls.__pydantic_core_schema__, None, [])
+            if found is not None:
+                nested, path = found
+                raise TypeError(
+                    f"field {'.'.join(path)!r} nests {nested.__name__}, which declares "
+                    "UnitDimension fields but is not a UnitAwareModel; make "
+                    f"{nested.__name__} a UnitAwareModel"
+                )
         # Resolve again during validation because model_rebuild() can complete
         # forward-referenced annotations later.
         cls._unit_reference_units()
@@ -339,15 +372,6 @@ class UnitAwareModel(BaseModel):
         )
         registered: dict[str, tuple[str, UnitDimension | None]] = {}
         for name, model_field in cls.model_fields.items():
-            # Only UnitAwareModel converts its own level; a plain schema type
-            # would ignore its suffixed keys and silently keep its defaults.
-            nested = _plain_type_with_dimensions(model_field.annotation, set())
-            if nested is not None:
-                raise TypeError(
-                    f"field {name!r} nests {nested.__name__}, which declares "
-                    f"UnitDimension fields but is not a UnitAwareModel; make "
-                    f"{nested.__name__} a UnitAwareModel"
-                )
             # Fields without a dimension are registered too, so a key they share
             # with a dimensioned field cannot hand them a converted value.
             dimension = _field_dimension(name, model_field)
@@ -435,23 +459,45 @@ class UnitAwareModel(BaseModel):
             # Pydantic ValidationError at the model's input location.
             raise ValueError(str(exc)) from exc
 
-    @model_validator(mode="after")
-    def _reject_unconverted_suffixes(self) -> UnitAwareModel:
-        # Only a UnitAwareModel converts its keys. A suffixed key that reached
-        # a dict field, an extra value or a plain nested model would keep its
-        # suffix and leave its value unconverted.
-        # The model itself is the root: its own keys were converted before.
-        seen: set[int] = set()
-        for name, value in _model_items(self).items():
-            found = _find_suffixed_key(value, seen)
-            if found is not None:
-                segments, key = found
-                path = "".join(["$.", name, *segments])
+    @model_validator(mode="wrap")
+    @classmethod
+    def _require_every_suffix_converted(
+        cls, data: Any, handler: ModelWrapValidatorHandler[UnitAwareModel]
+    ) -> UnitAwareModel:
+        # Every suffixed key in the input must be converted by a UnitAwareModel
+        # that ends up in the result. A key that a dict field kept, or that a
+        # plain model, dataclass or TypedDict dropped, has no such model.
+        ledger = _LEDGER.get()
+        if ledger is not None:
+            instance = handler(data)
+            ledger.sources[id(instance)] = id(data)
+            ledger.keep += [instance, data]
+            return instance
+
+        ledger = _SuffixLedger()
+        # The root's own keys are converted or rejected by its before hook.
+        root_id = id(data)
+        if isinstance(data, Mapping):
+            seen: set[int] = {root_id}
+            for key, value in cast(Mapping[Any, Any], data).items():
+                _record_suffixed_mappings(value, _child_path("$", key), ledger, seen)
+        token = _LEDGER.set(ledger)
+        try:
+            instance = handler(data)
+        finally:
+            _LEDGER.reset(token)
+        if not ledger.pending:
+            return instance
+
+        owned: set[int] = set()
+        _collect_sources(instance, ledger, owned, set())
+        for mapping_id, (path, key) in ledger.pending.items():
+            if mapping_id not in owned:
                 raise ValueError(
-                    f"key {key!r} at {path} has a unit suffix, but only the keys "
-                    "of a UnitAwareModel are converted"
+                    f"key {key!r} at {path} has a unit suffix, but no UnitAwareModel "
+                    "in the result converted it"
                 )
-        return self
+        return instance
 
 
 __all__ = ["UnitAwareModel"]

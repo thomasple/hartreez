@@ -9,6 +9,10 @@ from hartreez.dimensions import Dimensions
 from hartreez.parser import parse_unit
 
 
+# Key under which a UnitDimension marks the Pydantic core schema it annotates.
+SCHEMA_METADATA_KEY = "hartreez_unit_dimension"
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class UnitDimension:
     """Declare the expected dimensionality of a field using a unit expression.
@@ -30,3 +34,11 @@ class UnitDimension:
         unit = parse_unit(raw_expression)
         object.__setattr__(self, "expression", raw_expression)
         object.__setattr__(self, "dimensions", unit.dimensions)
+
+    def __get_pydantic_core_schema__(self, source: Any, handler: Any) -> Any:
+        # Pydantic calls this when it compiles an annotation. The schema and
+        # its validation are unchanged; the mark only lets UnitAwareModel find
+        # dimensions declared inside nested types that would ignore suffixes.
+        schema: dict[str, Any] = handler(source)
+        metadata: dict[str, Any] = schema.get("metadata", {})
+        return {**schema, "metadata": {**metadata, SCHEMA_METADATA_KEY: self}}
