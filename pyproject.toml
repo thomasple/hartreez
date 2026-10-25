@@ -40,16 +40,10 @@ Documentation = "https://github.com/thomasple/hartreez/tree/main/docs"
 dev = [
     "pyright>=1.1.414",
     "pytest>=9.1.1",
-    "pydantic>=2",
 ]
 
 [project.scripts]
 hartreez = "hartreez:main"
-
-[project.optional-dependencies]
-pydantic = [
-    "pydantic>=2",
-]
 
 [build-system]
 requires = ["uv_build>=0.8.17,<0.9.0"]

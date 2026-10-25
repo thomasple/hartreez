@@ -94,3 +94,29 @@ Invalid paths or unit expressions raise `ReferenceUnitsError` (a schema or
 configuration error). A supplied annotation whose dimensions disagree with
 its reference raises `MappingConversionError` with the normalized path, both
 expressions, and both dimensions.
+
+## Validate with Pydantic or another library
+
+`hartreez` has no validation-framework integration. Convert the mapping first,
+then pass the result to your validator. Values arrive as plain numbers in the
+working system, so field constraints and validators see converted values:
+
+```python
+from pydantic import BaseModel, Field
+
+from hartreez import au, convert_mapping
+
+
+class CalculationInput(BaseModel):
+    timestep: float = Field(gt=0)
+    energy: float
+
+
+raw = {"timestep[fs]": 0.5, "energy[eV]": 2.0}
+data = convert_mapping(raw, au, reference_units={"timestep": "fs", "energy": "eV"})
+inputs = CalculationInput.model_validate(data)
+```
+
+`reference_units` is where you declare the expected dimensions. Use JSON
+Pointer paths for nested models, for example `{"thermostat/tau": "fs"}`.
+Unannotated input is assumed to already be in the working system.

@@ -11,11 +11,7 @@ numbers and arrays, with no quantity wrappers or core runtime dependencies.
 pip install hartreez
 ```
 
-Requires Python 3.10 or newer. For optional Pydantic v2 input validation:
-
-```sh
-pip install 'hartreez[pydantic]'
-```
+Requires Python 3.10 or newer.
 
 ## Work in atomic units
 
@@ -94,31 +90,11 @@ checks.
 
 ## Validate inputs with Pydantic
 
-If you use Pydantic to describe calculation inputs, the optional integration
-converts unit-annotated values and checks their dimensions before validating
-field types and constraints. Define your input model with `UnitAwareModel`
-and supply the working system when validating:
-
-```python
-from typing import Annotated
-
-from hartreez import UnitDimension, au
-from hartreez.pydantic import UnitAwareModel
-
-
-class CalculationInput(UnitAwareModel):
-    energy: Annotated[float, UnitDimension("eV")]
-
-
-inputs = CalculationInput.model_validate(
-    {"energy[eV]": 2.0}, context={"unit_system": au}
-)
-```
-
-Here, `UnitDimension("eV")` requires an energy value, and the supplied `au`
-system makes `inputs.energy` a value in Hartree. See the
-[Pydantic integration guide](https://github.com/thomasple/hartreez/blob/main/docs/pydantic.md) for nested models and validation
-details.
+`hartreez` does not depend on a validation library. Convert unit-annotated
+input with `convert_mapping`, then validate the plain result with Pydantic or
+any other tool. See
+[validating with Pydantic](https://github.com/thomasple/hartreez/blob/main/docs/mappings.md#validate-with-pydantic-or-another-library)
+for an example.
 
 ## Use the command line
 

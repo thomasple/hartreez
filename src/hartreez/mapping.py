@@ -154,16 +154,10 @@ def normalize_mapping_level(
     system: UnitSystem,
     path: str,
     *,
-    recurse: bool,
     references: Mapping[str, _Reference] | None = None,
     pointer: str | None = "",
-    require_references: bool = False,
 ) -> dict[Any, Any]:
-    """Normalize one mapping level; ``recurse`` is a seam for shallow clients.
-
-    With ``require_references``, an annotated key without a reference unit is
-    rejected instead of being converted unchecked.
-    """
+    """Normalize one mapping level and recurse into unannotated values."""
 
     entries: list[tuple[Any, Any, str, str | None, str | None]] = []
     seen: dict[Any, Any] = {}
@@ -204,11 +198,6 @@ def normalize_mapping_level(
                 if references is not None and target_pointer is not None
                 else None
             )
-            if reference is None and require_references:
-                raise MappingConversionError(
-                    f"annotated key {original_key!r} at {original_path} has no reference "
-                    f"unit declared for normalized path {target_pointer}"
-                )
             if reference is not None:
                 reference_expression, reference_unit = reference
                 if unit.dimensions != reference_unit.dimensions:
@@ -225,12 +214,10 @@ def normalize_mapping_level(
                     f"{expression!r} at {original_path}: {exc}"
                 ) from exc
             normalized[canonical] = _scale_value(value, factor, target_path, original_key)
-        elif recurse:
+        else:
             normalized[canonical] = _normalize_unannotated(
                 value, system, target_path, references, target_pointer
             )
-        else:
-            normalized[canonical] = value
     return normalized
 
 
@@ -243,8 +230,7 @@ def _normalize_unannotated(
 ) -> Any:
     if isinstance(value, Mapping):
         return normalize_mapping_level(
-            cast(Mapping[Any, Any], value), system, path, recurse=True,
-            references=references, pointer=pointer
+            cast(Mapping[Any, Any], value), system, path, references=references, pointer=pointer
         )
     if isinstance(value, list):
         items = cast(list[Any], value)
@@ -299,5 +285,5 @@ def convert_mapping(mapping: Any, system: Any, *, reference_units: Any = None) -
         raise TypeError("system must be a UnitSystem")
     references = parse_reference_units(reference_units)
     return normalize_mapping_level(
-        cast(Mapping[Any, Any], mapping), system, "$", recurse=True, references=references
+        cast(Mapping[Any, Any], mapping), system, "$", references=references
     )
