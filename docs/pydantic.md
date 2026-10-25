@@ -163,10 +163,18 @@ The supported shapes are:
 - `tuple[T, ...]`, and fixed tuples whose elements all have the same
   dimension.
 
-One suffix applies one conversion factor to the whole value, and lists and
-tuples are scaled element by element: `positions[nm]` converts every
-position. Every `UnitDimension` in a field's annotation must agree on the
-dimensions.
+One suffix applies one conversion factor to the whole value, and lists,
+tuples, sets, and frozensets are scaled element by element: `positions[nm]`
+converts every position. Every `UnitDimension` in a field's annotation must
+agree on the dimensions.
+
+Conversion happens before Pydantic validates the field, so a suffixed value
+must itself be one of those four containers, nested as needed, or a value
+that supports multiplication by a Python `float`, such as a number or a NumPy
+array. Other iterables that Pydantic would accept for the field, such as a
+`deque` or a `range` for `Sequence[Length]`, raise a `ValidationError` naming
+their type; convert them to a list first. Arrays parsed from JSON or TOML
+are always lists.
 
 A `UnitDimension` anywhere else raises `TypeError` when the class is defined,
 independently of any input. This includes `dict[str, Length]`,

@@ -129,3 +129,12 @@ def test_set_shapes_convert_native_set_input() -> None:
 
     assert sorted(model.values) == pytest.approx([1.0, 2.0])
     assert sorted(model.frozen) == pytest.approx([3.0])
+
+
+@pytest.mark.parametrize("value", [deque([1.0]), range(3)])
+def test_other_iterables_under_a_suffix_are_rejected(value: object) -> None:
+    # Conversion runs before Pydantic, on lists, tuples, sets and frozensets.
+    with pytest.raises(ValidationError, match="unsupported value of type"):
+        ProjectedInput.model_validate(
+            {"sequence[angstrom]": value}, context={"unit_system": au}
+        )
