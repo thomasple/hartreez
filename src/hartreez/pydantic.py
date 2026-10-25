@@ -187,17 +187,19 @@ def _model_items(model: BaseModel) -> dict[str, Any]:
     return {**model.__dict__, **(model.__pydantic_extra__ or {})}
 
 
-def _find_suffixed_key(value: Any) -> tuple[list[str], str] | None:
+def _find_suffixed_key(value: Any, seen: set[int]) -> tuple[list[str], str] | None:
     """Return the path segments to the first suffixed key below ``value``.
 
     Segments are built only on the way back, so a large numeric list costs one
-    isinstance check per element.
+    isinstance check per element. ``seen`` holds the ids of values already
+    searched, so shared and cyclic values are visited once.
     """
 
     children: Iterable[tuple[Any, Any]]
     # A UnitAwareModel has already converted or rejected its own keys.
-    if isinstance(value, UnitAwareModel):
+    if isinstance(value, UnitAwareModel) or id(value) in seen:
         return None
+    seen.add(id(value))
     if isinstance(value, BaseModel):
         # Extra values of a plain model keep their input keys as names.
         for name in value.__pydantic_extra__ or {}:
@@ -220,7 +222,7 @@ def _find_suffixed_key(value: Any) -> tuple[list[str], str] | None:
     for segment, child in children:
         if isinstance(child, (float, int, str)):
             continue
-        found = _find_suffixed_key(child)
+        found = _find_suffixed_key(child, seen)
         if found is not None:
             segments, key = found
             name = segment if segment.startswith("[") else f".{segment}"
@@ -388,8 +390,9 @@ class UnitAwareModel(BaseModel):
         # a dict field, an extra value or a plain nested model would keep its
         # suffix and leave its value unconverted.
         # The model itself is the root: its own keys were converted before.
+        seen: set[int] = set()
         for name, value in _model_items(self).items():
-            found = _find_suffixed_key(value)
+            found = _find_suffixed_key(value, seen)
             if found is not None:
                 segments, key = found
                 path = "".join(["$.", name, *segments])
