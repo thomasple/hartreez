@@ -248,13 +248,15 @@ except ValidationError as error:
     assert "'H[Da]' at $.masses" in str(error)
 ```
 
-A nested `UnitAwareModel` is matched to its input by object identity:
-Pydantic passes it the mapping object from the input. A validator that runs
-before it, such as a `model_validator(mode="before")` on an enclosing model or
-a `field_validator(mode="before")` on the field, must return nested input
-mappings unchanged. A validator that copies one, for example with
-`dict(value)`, makes the converted keys look unconverted, so validation
-fails.
+A nested `UnitAwareModel` is matched to the input mapping it was built
+from: the same object, which Pydantic passes on from the input, or else an
+equal copy of it. A validator that runs before it, such as a
+`model_validator(mode="before")` on an enclosing model or a
+`field_validator(mode="before")` on the field, may therefore copy nested
+input, for example with `dict(value)` or `copy.deepcopy(data)`. It must not
+change a nested mapping that holds suffixed keys, for example by adding a
+default key: the changed mapping matches no input, so its converted keys
+look unconverted and validation fails.
 
 For models that read input files, set `extra="forbid"` at every level as
 well, so misspelled keys are rejected like stray suffixed ones.

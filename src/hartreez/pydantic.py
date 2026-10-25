@@ -190,15 +190,56 @@ class _SuffixLedger:
     """Suffixed raw mappings below one root UnitAwareModel, and who converted them.
 
     Pydantic hands every nested model the raw mapping object from the input,
-    so object identity links a raw mapping to the model built from it.
+    so object identity links a raw mapping to the model built from it. A
+    validator may hand on a copy instead, which is matched by equal contents.
     """
 
     # id of each raw mapping holding a suffixed key -> (path, first such key).
     pending: dict[int, tuple[str, str]] = field(default_factory=dict[int, tuple[str, str]])
+    # Pending mappings not yet matched, by key set and then id, in input
+    # order, for matching copies.
+    unmatched: dict[frozenset[Any], dict[int, Mapping[Any, Any]]] = field(
+        default_factory=dict[frozenset[Any], dict[int, Mapping[Any, Any]]]
+    )
+    # id of each copy -> id of the pending mapping it was matched to, if any.
+    copies: dict[int, int | None] = field(default_factory=dict[int, int | None])
     # id of each nested UnitAwareModel instance -> id of its raw input.
     sources: dict[int, int] = field(default_factory=dict[int, int])
     # Keeps recorded objects alive so their ids stay unique until the check.
     keep: list[Any] = field(default_factory=list[Any])
+
+    def source_of(self, data: Any) -> int | None:
+        """Return the id of the pending mapping ``data`` is, or is a copy of."""
+
+        data_id = id(data)
+        if data_id in self.pending:
+            # Matched by identity, so no copy can claim it as well.
+            self.unmatched.get(frozenset(data), {}).pop(data_id, None)
+            return data_id
+        if data_id not in self.copies:
+            self.copies[data_id] = self._match_copy(data)
+            self.keep.append(data)
+        return self.copies[data_id]
+
+    def _match_copy(self, data: Any) -> int | None:
+        # Only a mapping that still holds a suffixed key can be a copy of a
+        # pending one; each pending mapping is matched by at most one copy.
+        if not isinstance(data, Mapping):
+            return None
+        mapping = cast(Mapping[Any, Any], data)
+        if not any(_has_unit_suffix(key) for key in mapping):
+            return None
+        candidates = self.unmatched.get(frozenset(mapping), {})
+        for candidate_id, candidate in candidates.items():
+            try:
+                equal = bool(candidate == mapping)
+            except Exception:
+                # e.g. NumPy arrays, whose comparison has no single truth value.
+                equal = False
+            if equal:
+                del candidates[candidate_id]
+                return candidate_id
+        return None
 
 
 _LEDGER: ContextVar[_SuffixLedger | None] = ContextVar("hartreez_suffix_ledger", default=None)
@@ -216,6 +257,7 @@ def _record_suffixed_mappings(value: Any, path: str, ledger: _SuffixLedger, seen
         suffixed = next((key for key in mapping if _has_unit_suffix(key)), None)
         if suffixed is not None:
             ledger.pending[id(mapping)] = (path, suffixed)
+            ledger.unmatched.setdefault(frozenset(mapping), {})[id(mapping)] = mapping
             ledger.keep.append(mapping)
         for key, item in mapping.items():
             if not isinstance(item, (float, int, str)):
@@ -470,8 +512,10 @@ class UnitAwareModel(BaseModel):
         ledger = _LEDGER.get()
         if ledger is not None:
             instance = handler(data)
-            ledger.sources[id(instance)] = id(data)
-            ledger.keep += [instance, data]
+            source = ledger.source_of(data)
+            if source is not None:
+                ledger.sources[id(instance)] = source
+                ledger.keep.append(instance)
             return instance
 
         ledger = _SuffixLedger()

@@ -794,18 +794,67 @@ def test_a_dict_object_shared_by_two_nested_models_converts_in_both() -> None:
     assert [p.mass for p in model.particles] == pytest.approx([au.factor_from("Da")] * 2)
 
 
-def test_validators_that_copy_nested_input_are_rejected() -> None:
-    # Nested models are matched to their input by object identity, so a
-    # validator must return nested input mappings unchanged.
-    class Copying(UnitAwareModel):
+class CopiedParticle(UnitAwareModel):
+    particle: ParticleInput
+
+    @field_validator("particle", mode="before")
+    @classmethod
+    def copy_particle(cls, value: Any) -> Any:
+        return dict(value)
+
+
+class DeepCopiedParticles(UnitAwareModel):
+    particles: list[ParticleInput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def copy_input(cls, data: Any) -> Any:
+        return deepcopy(data)
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (CopiedParticle, {"particle": {"mass[Da]": 1.0, "momentum": 0.0}}),
+        (
+            DeepCopiedParticles,
+            {"particles": [{"mass[Da]": 1.0, "momentum": 0.0}, {"mass[Da]": 1.0, "momentum": 0.0}]},
+        ),
+    ],
+)
+def test_validators_may_copy_nested_input(
+    model: type[UnitAwareModel], payload: dict[str, object]
+) -> None:
+    # Nested models are matched to their input by identity, then by equal
+    # contents, so a copy of a nested input mapping still counts.
+    model.model_validate(payload, context={"unit_system": au})
+
+
+def test_validators_that_change_nested_input_are_rejected() -> None:
+    class Changing(UnitAwareModel):
         particle: ParticleInput
 
-        @model_validator(mode="before")
+        @field_validator("particle", mode="before")
         @classmethod
-        def copy_particle(cls, data: Any) -> Any:
-            return {**data, "particle": dict(data["particle"])}
+        def add_momentum(cls, value: Any) -> Any:
+            return {**value, "momentum": 0.0}
 
     with pytest.raises(ValidationError, match=r"'mass\[Da\]' at \$\.particle"):
-        Copying.model_validate(
-            {"particle": {"mass[Da]": 1.0, "momentum": 0.0}}, context={"unit_system": au}
+        Changing.model_validate({"particle": {"mass[Da]": 1.0}}, context={"unit_system": au})
+
+
+def test_a_copy_converts_only_one_of_two_equal_inputs() -> None:
+    class Pair(UnitAwareModel):
+        particle: ParticleInput
+        dropped: PlainMass
+
+        @field_validator("particle", mode="before")
+        @classmethod
+        def copy_particle(cls, value: Any) -> Any:
+            return dict(value)
+
+    same = {"mass[Da]": 1.0, "momentum": 0.0}
+    with pytest.raises(ValidationError, match=r"'mass\[Da\]' at \$\.dropped"):
+        Pair.model_validate(
+            {"particle": dict(same), "dropped": dict(same)}, context={"unit_system": au}
         )
