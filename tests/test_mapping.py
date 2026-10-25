@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -21,6 +21,15 @@ def test_converts_scalars_and_nested_lists_and_tuples() -> None:
     ]
     assert result["pair"] == pytest.approx((au.EV, 2.0 * au.EV))
     assert isinstance(result["pair"], tuple)
+
+
+def test_converts_sets_and_frozensets_keeping_their_type() -> None:
+    result = convert_mapping({"r[angstrom]": {1.0, 2.0}, "e[eV]": frozenset({3.0})}, au)
+
+    assert isinstance(result["r"], set)
+    assert sorted(cast(set[float], result["r"])) == pytest.approx([au.ANGSTROM, 2.0 * au.ANGSTROM])
+    assert isinstance(result["e"], frozenset)
+    assert sorted(cast(frozenset[float], result["e"])) == pytest.approx([3.0 * au.EV])
 
 
 def test_recurses_through_nested_mappings_and_sequences() -> None:

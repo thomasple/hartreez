@@ -115,7 +115,7 @@ def _annotation(key: str, path: str) -> tuple[str, str] | None:
 
 
 def _scale_value(value: Any, factor: float, path: str, original_key: str) -> Any:
-    """Scale supported annotated values, retaining list and tuple structure."""
+    """Scale supported annotated values, retaining list, tuple and set structure."""
 
     if isinstance(value, Mapping):
         raise MappingConversionError(
@@ -134,6 +134,11 @@ def _scale_value(value: Any, factor: float, path: str, original_key: str) -> Any
             _scale_value(item, factor, f"{path}[{index}]", original_key)
             for index, item in enumerate(items)
         )
+    if isinstance(value, (set, frozenset)):
+        # Sets have no positions, so every element reports the set's path.
+        items = cast(set[Any] | frozenset[Any], value)
+        scaled = (_scale_value(item, factor, path, original_key) for item in items)
+        return frozenset(scaled) if isinstance(value, frozenset) else set(scaled)
     if isinstance(value, bool) or value is None or isinstance(value, str):
         raise MappingConversionError(
             f"cannot scale value at {path} from annotated key {original_key!r}: "

@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from copy import deepcopy
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 import pytest
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -631,3 +631,15 @@ assert UnitDimension('fs').dimensions == hartreez.parse_unit('ps').dimensions
 assert 'pydantic' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", script], check=True)
+
+
+class AnyPayloadInput(UnitAwareModel):
+    payload: Any = None
+
+
+def test_cyclic_values_without_suffixes_are_accepted() -> None:
+    cycle: list[Any] = []
+    cycle.append(cycle)
+
+    model = AnyPayloadInput.model_validate({"payload": cycle})
+    assert model.payload is cycle

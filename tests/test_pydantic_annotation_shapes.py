@@ -112,3 +112,20 @@ def test_plain_models_with_dimensions_are_found_through_generic_aliases() -> Non
             (UnitAwareModel,),
             {"__annotations__": {"particles": Vector[PlainParticle]}},
         )
+
+
+class SetInput(UnitAwareModel):
+    values: set[Length] = set()
+    frozen: frozenset[Length] = frozenset()
+
+
+def test_set_shapes_convert_native_set_input() -> None:
+    nm = UnitSystem(length="nm", time="ps", energy="kJ/mol")
+
+    model = SetInput.model_validate(
+        {"values[angstrom]": {10.0, 20.0}, "frozen[angstrom]": frozenset({30.0})},
+        context={"unit_system": nm},
+    )
+
+    assert sorted(model.values) == pytest.approx([1.0, 2.0])
+    assert sorted(model.frozen) == pytest.approx([3.0])

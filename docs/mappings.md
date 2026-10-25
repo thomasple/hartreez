@@ -23,8 +23,8 @@ recursively. The input mapping is left untouched. Unannotated values are
 assumed to already use the selected working units, and non-string keys are
 preserved as-is.
 
-Lists and tuples under annotated keys are scaled recursively while retaining
-their structure. Other numeric or array-like values can participate by
+Lists, tuples, sets, and frozensets under annotated keys are scaled
+recursively while retaining their structure. Other numeric or array-like values can participate by
 supporting multiplication by a Python `float`. The core package does not
 import NumPy or another numerical framework. Annotated booleans, strings,
 `None`, unsupported leaves, and mapping values raise `MappingConversionError`
