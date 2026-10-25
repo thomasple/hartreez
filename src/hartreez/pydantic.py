@@ -12,7 +12,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 import typing_extensions
-from pydantic import AliasChoices, BaseModel, ValidationInfo, model_validator
+from pydantic import AliasChoices, AliasPath, BaseModel, ValidationInfo, model_validator
 from pydantic.fields import FieldInfo
 
 from hartreez.errors import MappingConversionError, ReferenceUnitsError
@@ -239,16 +239,29 @@ class UnitAwareModel(BaseModel):
             # with a dimensioned field cannot hand them a converted value.
             dimension = _field_dimension(name, model_field)
             # Input arrives under the validation alias, which Pydantic also
-            # fills from ``alias`` and ``alias_generator``. AliasPath is not
-            # supported.
+            # fills from ``alias`` and ``alias_generator``.
             alias = model_field.validation_alias
+            choices: list[str | AliasPath] = []
+            if isinstance(alias, AliasChoices):
+                choices = alias.choices
+            elif alias is not None:
+                choices = [alias]
+            if dimension is not None and any(isinstance(c, AliasPath) for c in choices):
+                raise TypeError(
+                    f"field {name!r} declares UnitDimension metadata and an AliasPath "
+                    "validation alias; unit suffixes are only read at the model's own "
+                    "mapping level, so use a string alias"
+                )
             keys: list[str] = []
             if alias is None or by_name:
                 keys.append(name)
-            if isinstance(alias, str) and by_alias:
-                keys.append(alias)
-            if isinstance(alias, AliasChoices) and by_alias:
-                keys.extend(choice for choice in alias.choices if isinstance(choice, str))
+            if by_alias:
+                for choice in choices:
+                    # An AliasPath reads below this level, but its first key is
+                    # an input key here and can be shared like any other.
+                    first = choice if isinstance(choice, str) else choice.path[0]
+                    if isinstance(first, str):
+                        keys.append(first)
             for key in keys:
                 pointer = f"/{_pointer_token(key)}"
                 previous_name, previous = registered.setdefault(pointer, (name, dimension))

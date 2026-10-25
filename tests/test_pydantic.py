@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Annotated, Optional
 
 import pytest
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic.alias_generators import to_camel
 from typing_extensions import TypeAliasType
 
@@ -409,11 +409,35 @@ def test_input_keys_shared_with_undimensioned_fields_are_rejected() -> None:
             length: Length = Field(default=1.0, validation_alias="v")
             raw: float = Field(default=1.0, validation_alias=AliasChoices("w", "v"))
 
+    with pytest.raises(TypeError, match="'length' and 'raw'"):
+
+        class SharedPath(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
+            length: Length = Field(default=1.0, validation_alias="v")
+            raw: float = Field(default=1.0, validation_alias=AliasPath("v", 0))
+
     with pytest.raises(TypeError, match="'raw' and 'length'"):
 
         class UndimensionedFirst(UnitAwareModel):  # pyright: ignore[reportUnusedClass]
             raw: float = Field(default=1.0, validation_alias="v")
             length: Length = Field(default=1.0, validation_alias="v")
+
+
+@pytest.mark.parametrize(
+    "alias", [AliasPath("outer", "x"), AliasChoices("x", AliasPath("outer", "x"))]
+)
+def test_alias_paths_on_dimensioned_fields_are_rejected_when_the_model_is_defined(
+    alias: AliasPath | AliasChoices,
+) -> None:
+    # A suffix inside a path would never reach the model's own mapping level.
+    with pytest.raises(TypeError, match="field 'x'.*AliasPath"):
+        type(
+            "PathInput",
+            (UnitAwareModel,),
+            {
+                "__annotations__": {"x": Length},
+                "x": Field(default=1.0, validation_alias=alias),
+            },
+        )
 
 
 def test_input_keys_shared_only_by_undimensioned_fields_are_allowed() -> None:
